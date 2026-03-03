@@ -1,0 +1,2 @@
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
