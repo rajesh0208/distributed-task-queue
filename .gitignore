@@ -1,0 +1,48 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Environment
+.env
+.env.local
+
+# Storage
+storage/images/*
+!storage/images/.gitkeep
+storage/uploads/*
+
+# Compiled binaries (in backend root)
+backend/api
+backend/worker
+backend/grpc-server
+
+# Test assets
+test_images/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Dependencies
+node_modules/
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build
+dist/
+build/
+
+# Secrets
+k8s/secrets.yaml
