@@ -1,0 +1,36 @@
+groups:
+  - name: taskqueue_alerts
+    interval: 30s
+    rules:
+      - alert: HighTaskFailureRate
+        expr: rate(taskqueue_tasks_processed_total{status="failed"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High task failure rate detected"
+
+      - alert: NoActiveWorkers
+        expr: taskqueue_workers_active == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active workers available"
+
+      - alert: HighQueueDepth
+        expr: taskqueue_tasks_queued > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task queue depth is high"
+
+      - alert: APIHighLatency
+        expr: histogram_quantile(0.95, taskqueue_api_request_duration_seconds_bucket) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API latency is high"
+

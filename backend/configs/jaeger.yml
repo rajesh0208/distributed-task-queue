@@ -1,0 +1,13 @@
+collector:
+  zipkin:
+    http-port: 9411
+
+query:
+  base-path: /jaeger
+
+storage:
+  type: memory
+  options:
+    memory:
+      max-traces: 100000
+
