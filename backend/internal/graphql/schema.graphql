@@ -1,0 +1,82 @@
+type Task {
+  id: ID!
+  type: String!
+  payload: String!
+  status: String!
+  priority: Int!
+  retries: Int!
+  maxRetries: Int!
+  createdAt: String!
+  startedAt: String
+  completedAt: String
+  workerId: String
+  processingTime: Int
+  error: String
+}
+
+type Worker {
+  workerId: ID!
+  status: String!
+  tasksProcessed: Int!
+  tasksFailed: Int!
+  lastHeartbeat: String!
+  startTime: String!
+  currentTask: String
+  activeGoroutines: Int!
+}
+
+type Metrics {
+  totalTasks: Int!
+  queuedTasks: Int!
+  processingTasks: Int!
+  completedTasks: Int!
+  failedTasks: Int!
+  activeWorkers: Int!
+  taskTypeCounts: [TaskTypeCount!]!
+}
+
+type TaskTypeCount {
+  type: String!
+  count: Int!
+}
+
+type Query {
+  task(id: ID!): Task
+  tasks(status: String, page: Int, pageSize: Int): TaskList!
+  workers: [Worker!]!
+  metrics: Metrics!
+}
+
+type Mutation {
+  submitTask(type: String!, payload: String!, priority: Int, maxRetries: Int): TaskResponse!
+  deleteTask(id: ID!): DeleteResponse!
+  cancelTask(id: ID!): CancelResponse!
+}
+
+type Subscription {
+  taskUpdated(id: ID!): Task!
+  taskStatusChanged: Task!
+}
+
+type TaskList {
+  tasks: [Task!]!
+  total: Int!
+  page: Int!
+  pageSize: Int!
+}
+
+type TaskResponse {
+  taskId: ID!
+  status: String!
+  message: String!
+  createdAt: String!
+}
+
+type DeleteResponse {
+  message: String!
+}
+
+type CancelResponse {
+  message: String!
+}
+
