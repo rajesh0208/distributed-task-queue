@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package taskqueue;
+
+option go_package = "distributed-task-queue/proto";
+
+// TaskService handles task operations
+service TaskService {
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+}
+
+// WorkerService handles worker operations
+service WorkerService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// CoordinatorService handles coordination between services
+service CoordinatorService {
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Task messages
+message Task {
+  string id = 1;
+  string type = 2;
+  bytes payload = 3;
+  string status = 4;
+  int32 priority = 5;
+  int32 retries = 6;
+  int32 max_retries = 7;
+  int64 created_at = 8;
+  int64 started_at = 9;
+  int64 completed_at = 10;
+  string worker_id = 11;
+  int64 processing_time = 12;
+  string error = 13;
+}
+
+message SubmitTaskRequest {
+  string type = 1;
+  bytes payload = 2;
+  int32 priority = 3;
+  int32 max_retries = 4;
+}
+
+message SubmitTaskResponse {
+  string task_id = 1;
+  string status = 2;
+  string message = 3;
+  int64 created_at = 4;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message GetTaskResponse {
+  Task task = 1;
+  string message = 2;
+}
+
+message ListTasksRequest {
+  string status = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message DeleteTaskRequest {
+  string task_id = 1;
+}
+
+message DeleteTaskResponse {
+  string message = 1;
+}
+
+message CancelTaskRequest {
+  string task_id = 1;
+}
+
+message CancelTaskResponse {
+  string message = 1;
+}
+
+// Worker messages
+message Worker {
+  string worker_id = 1;
+  string status = 2;
+  int32 tasks_processed = 3;
+  int32 tasks_failed = 4;
+  int64 last_heartbeat = 5;
+  int64 start_time = 6;
+  string current_task = 7;
+  int32 active_goroutines = 8;
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+}
+
+message RegisterWorkerResponse {
+  string message = 1;
+  bool success = 2;
+}
+
+message GetWorkerStatusRequest {
+  string worker_id = 1;
+}
+
+message GetWorkerStatusResponse {
+  Worker worker = 1;
+}
+
+message ListWorkersRequest {
+}
+
+message ListWorkersResponse {
+  repeated Worker workers = 1;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  string status = 2;
+  int32 active_goroutines = 3;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+}
+
+// Coordinator messages
+message GetMetricsRequest {
+}
+
+message GetMetricsResponse {
+  int64 total_tasks = 1;
+  int64 queued_tasks = 2;
+  int64 processing_tasks = 3;
+  int64 completed_tasks = 4;
+  int64 failed_tasks = 5;
+  int32 active_workers = 6;
+  map<string, int64> task_type_counts = 7;
+}
+
+message HealthCheckRequest {
+}
+
+message HealthCheckResponse {
+  string status = 1;
+  map<string, string> checks = 2;
+}
+
