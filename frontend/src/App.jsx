@@ -1,3 +1,6 @@
+// src/App.jsx
+// Root component — handles auth state, OAuth callback token pickup, and top-level layout.
+
 import React, { useState, useEffect } from 'react'
 import Dashboard from './components/Dashboard'
 import Login from './components/Login'
@@ -8,22 +11,18 @@ function App() {
   const [checkingAuth, setCheckingAuth] = useState(true)
 
   useEffect(() => {
-    // Handle OAuth callback: backend redirects to /?token=<jwt>
+    // Handle OAuth callback: backend redirects to /?token=<jwt> after social login.
     const params = new URLSearchParams(window.location.search)
     const oauthToken = params.get('token')
     if (oauthToken) {
       localStorage.setItem('token', oauthToken)
-      // Remove token from URL without triggering a page reload
       window.history.replaceState({}, document.title, window.location.pathname)
       setIsAuthenticated(true)
       setCheckingAuth(false)
       return
     }
-
     const token = localStorage.getItem('token')
-    if (token) {
-      setIsAuthenticated(true)
-    }
+    if (token) setIsAuthenticated(true)
     setCheckingAuth(false)
   }, [])
 
@@ -39,8 +38,12 @@ function App() {
 
   if (checkingAuth) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-gray-600 text-lg font-medium animate-pulse">
+      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+        <div className="flex items-center gap-3 text-slate-400">
+          <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+          </svg>
           Checking authentication…
         </div>
       </div>
@@ -52,36 +55,35 @@ function App() {
   }
 
   return (
-    <div className="h-screen bg-gray-100 flex flex-col overflow-hidden">
-      {/* ──────────────────────────── NAVBAR ──────────────────────────── */}
-      <nav className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16 items-center">
-            {/* LEFT: BRAND */}
-            <div className="flex items-center space-x-3">
-              <div className="text-xl font-bold text-gray-900">
-                Task Queue Dashboard
-              </div>
-              <span className="text-sm text-gray-500 hidden sm:block">
-                • Manage & Monitor Tasks
-              </span>
+    <div className="h-screen bg-slate-950 flex flex-col overflow-hidden">
+      {/* Navbar */}
+      <nav className="flex-shrink-0 bg-slate-900 border-b border-slate-800">
+        <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center">
+              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
             </div>
-
-            {/* RIGHT: BUTTONS */}
-            <div className="flex items-center space-x-3">
-              <button
-                onClick={handleLogout}
-                className="px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 text-sm font-medium shadow-sm"
-              >
-                Logout
-              </button>
-            </div>
+            <span className="text-white font-semibold text-sm">Task Queue</span>
+            <span className="hidden sm:inline text-slate-500 text-xs">/ Dashboard</span>
           </div>
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition-colors px-3 py-1.5 rounded-lg hover:bg-slate-800"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+            </svg>
+            Sign out
+          </button>
         </div>
       </nav>
 
-      {/* ─────────────────────────── MAIN CONTENT ─────────────────────────── */}
-      <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex-1 overflow-hidden">
+      {/* Main content */}
+      <main className="flex-1 overflow-hidden max-w-screen-xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5">
         <Dashboard />
       </main>
     </div>
