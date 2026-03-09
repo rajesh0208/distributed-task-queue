@@ -44,8 +44,8 @@ function Login({ onLogin }) {
   }
 
   const handleOAuth = (provider) => {
-    // Redirect to the backend OAuth login URL; backend will redirect back with ?token=
-    window.location.href = `${API_BASE}/auth/oauth/${provider}/login`
+    // Redirect to the backend OAuth initiation URL; backend will redirect back with ?token=
+    window.location.href = `${API_BASE}/auth/oauth/${provider}`
   }
 
   return (
