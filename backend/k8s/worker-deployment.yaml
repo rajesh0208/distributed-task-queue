@@ -1,0 +1,46 @@
+# File: k8s/worker-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskqueue-worker
+  namespace: taskqueue
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: taskqueue-worker
+  template:
+    metadata:
+      labels:
+        app: taskqueue-worker
+    spec:
+      containers:
+      - name: worker
+        image: taskqueue-worker:latest
+        env:
+        - name: WORKER_CONCURRENCY
+          value: "4"
+        - name: REDIS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: taskqueue-config
+              key: REDIS_ADDR
+        - name: POSTGRES_DSN
+          value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: taskqueue-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: taskqueue-secrets
+              key: POSTGRES_PASSWORD
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"

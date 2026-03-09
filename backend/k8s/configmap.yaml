@@ -1,0 +1,13 @@
+# File: k8s/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskqueue-config
+  namespace: taskqueue
+data:
+  REDIS_ADDR: "redis-service:6379"
+  POSTGRES_HOST: "postgres-service"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "taskqueue"
+  API_PORT: "8080"
+  GRPC_PORT: "50051"

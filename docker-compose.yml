@@ -1,0 +1,171 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: taskqueue-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskqueue-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: taskqueue-postgres
+    environment:
+      POSTGRES_DB: taskqueue
+      POSTGRES_USER: taskqueue_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskqueue_user -d taskqueue"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskqueue-network
+
+  # Jaeger all-in-one: collects OpenTelemetry spans from the API and worker
+  # and provides a web UI to visualise distributed traces across services.
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: taskqueue-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI  → open http://localhost:16686
+      - "14268:14268"   # HTTP collector — API/worker send spans here
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.api
+    container_name: taskqueue-api
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - POSTGRES_DSN=postgres://taskqueue_user:${POSTGRES_PASSWORD}@postgres:5432/taskqueue?sslmode=disable
+      - API_PORT=8080
+      - STORAGE_DIR=/app/storage/images
+      # APP_BASE_URL is used to build OAuth redirect/callback URLs — must match
+      # the public address clients use to reach this API.
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:8080}
+      - JWT_SECRET=${JWT_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+      # OAuth 2.0 — leave blank to disable social login for a provider.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+    volumes:
+      - ./backend/storage:/app/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      - REDIS_ADDR=redis:6379
+      - POSTGRES_DSN=postgres://taskqueue_user:${POSTGRES_PASSWORD}@postgres:5432/taskqueue?sslmode=disable
+      - WORKER_CONCURRENCY=4
+      - STORAGE_DIR=/app/storage/images
+      - BASE_URL=http://api:8080
+      - API_SERVICE_URL=http://api:8080
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+    volumes:
+      - ./backend/storage:/app/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+      jaeger:
+        condition: service_started
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+    deploy:
+      # Scale to 2 workers by default; each independently consumes from the
+      # Redis Stream consumer group for automatic task fan-out.
+      replicas: 2
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: taskqueue-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: taskqueue-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./backend/configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: taskqueue-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - taskqueue-network
+    restart: unless-stopped
+
+networks:
+  taskqueue-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

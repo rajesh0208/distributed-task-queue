@@ -1,0 +1,40 @@
+# ── Build stage ───────────────────────────────────────────────────────────────
+# Use the same Go version as go.mod so module toolchain directives are honoured.
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+# gcc + musl-dev are required by CGO (libwebp bindings use C).
+RUN apk add --no-cache git gcc musl-dev libwebp-dev
+
+# Download dependencies before copying source so Docker layer cache is reused
+# on subsequent builds when only source files change.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Build with the graphql tag so the GraphQL handler is compiled in.
+# CGO_ENABLED=1 is required for the libwebp image encoder.
+RUN CGO_ENABLED=1 GOOS=linux go build -tags graphql -ldflags="-s -w" -o /app/bin/api ./cmd/api
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+# Minimal Alpine image — only the shared libraries the binary actually needs.
+FROM alpine:3.20
+
+RUN apk --no-cache add ca-certificates libwebp tzdata
+
+WORKDIR /app
+
+COPY --from=builder /app/bin/api .
+
+# Create storage directories that the API uses for uploaded and processed images.
+RUN mkdir -p /app/storage/images /app/storage/uploads
+
+EXPOSE 8080
+
+# Run as a non-root user for defence-in-depth.
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+CMD ["./api"]
