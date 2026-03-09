@@ -56,7 +56,8 @@ A production-ready distributed image-processing task queue built with **Go**, **
 - **Distributed tracing** — OTel spans linked from HTTP → Redis Stream → worker visible in Jaeger
 - **Prometheus + Grafana** — task counters, processing-time histograms, circuit-breaker state gauge, worker heartbeats
 - **REST + GraphQL + gRPC** — pick the protocol your client needs
-- **React dashboard** — live task table, metrics cards, image submit form
+- **React dashboard** — live task table, metrics cards, single-image submit, and **batch upload** (drop N images, upload all, fan out as one batch)
+- **OAuth login UI** — Google and GitHub sign-in buttons on the login page; token handed back via redirect and stored automatically
 
 ---
 
@@ -246,6 +247,13 @@ npm run dev
 ```
 
 The Vite config proxies `/api` requests to `http://localhost:8080`, so no CORS issues during development.
+
+**Login options available in the UI:**
+- Email + password (register or sign in)
+- **Continue with Google** / **Continue with GitHub** — clicking these redirects to the backend OAuth flow. The backend redirects back to the frontend with `?token=<jwt>` which is picked up automatically.
+
+**Batch image upload:**
+On the Submit Task card, toggle **Batch mode** on. Drop multiple images into the drop zone, click **Upload All**, then **Submit Batch**. Each image becomes an individual task in a shared batch ID you can poll with `GET /api/v1/tasks/batch/:id`.
 
 To build for production:
 
@@ -626,8 +634,8 @@ distributed-task-queue/
 │   └── Makefile
 ├── frontend/
 │   ├── src/
-│   │   ├── components/           # Dashboard, TaskList, SubmitCard, …
-│   │   ├── api/                  # REST API client (axios)
+│   │   ├── components/           # Dashboard, TaskList, SubmitCard (single + batch), Login (OAuth)
+│   │   ├── api/                  # REST API client — axios, createTask, createBatch, uploadFile
 │   │   └── graphql/              # Apollo client, queries, mutations
 │   ├── Dockerfile                # nginx serving built assets
 │   └── vite.config.js

@@ -8,6 +8,18 @@ function App() {
   const [checkingAuth, setCheckingAuth] = useState(true)
 
   useEffect(() => {
+    // Handle OAuth callback: backend redirects to /?token=<jwt>
+    const params = new URLSearchParams(window.location.search)
+    const oauthToken = params.get('token')
+    if (oauthToken) {
+      localStorage.setItem('token', oauthToken)
+      // Remove token from URL without triggering a page reload
+      window.history.replaceState({}, document.title, window.location.pathname)
+      setIsAuthenticated(true)
+      setCheckingAuth(false)
+      return
+    }
+
     const token = localStorage.getItem('token')
     if (token) {
       setIsAuthenticated(true)
