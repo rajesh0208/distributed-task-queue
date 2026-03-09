@@ -262,11 +262,13 @@ func (s *APIServer) setupRoutes() {
 	metricsGroup.Get("/system", s.getMetrics) // returns aggregate system metrics (task counts, worker stats) from Postgres
 
 	// Admin-only routes — accessible only to users whose token includes the "admin" role.
-	adminOnly := protected.Group("/", security.RoleMiddleware("admin"))
-	adminOnly.Get("/users", s.listUsers)           // paginated list of all users
-	adminOnly.Get("/users/:id", s.getUserByID)     // fetch any user by ID
-	adminOnly.Put("/users/:id", s.updateUser)      // admin can update any user's email or roles
-	adminOnly.Delete("/users/:id", s.deleteUser)   // permanently removes a user (cannot delete self)
+	// IMPORTANT: group path must be "/users" not "/" — using "/" as a group prefix in Fiber v2
+	// causes RoleMiddleware to match every route under protected, not just these four.
+	adminOnly := protected.Group("/users", security.RoleMiddleware("admin"))
+	adminOnly.Get("/", s.listUsers)           // GET  /api/v1/users         — paginated list of all users
+	adminOnly.Get("/:id", s.getUserByID)      // GET  /api/v1/users/:id     — fetch any user by ID
+	adminOnly.Put("/:id", s.updateUser)       // PUT  /api/v1/users/:id     — admin can update any user's email or roles
+	adminOnly.Delete("/:id", s.deleteUser)    // DELETE /api/v1/users/:id   — permanently removes a user (cannot delete self)
 
 	// GraphQL is optional — the build tag "graphql" must be set to compile a real server.
 	// If NewServer returns an error (e.g., stub build), we log a warning and skip the route.
