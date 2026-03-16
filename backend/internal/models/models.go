@@ -1,3 +1,16 @@
+// Package models defines every shared data structure used across the
+// distributed task queue system.
+//
+// This file is responsible for:
+//   - Declaring all domain types (Task, User, Batch, metrics structs)
+//   - Defining typed constants for task/batch statuses and task types
+//   - Providing JSON/DB serialisation tags so the same structs work for
+//     both HTTP responses and PostgreSQL queries
+//
+// It connects to: every other package — storage, broker, processor,
+//   security, monitoring, graphql, grpc, and the API handlers all import
+//   this package to share a single canonical definition of each type.
+// Called by: all packages in backend/internal/ and backend/cmd/.
 package models
 
 import (
@@ -5,32 +18,126 @@ import (
 	"time"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Task status — the lifecycle of a single task
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TaskStatus is a typed string so the compiler rejects arbitrary strings
+// where a status is expected. This prevents typos like "complete" vs
+// "completed" from silently passing through.
 type TaskStatus string
 
 const (
-	StatusQueued     TaskStatus = "queued"
+	// StatusQueued means the task has been accepted and published to the
+	// Redis Stream, but no worker has picked it up yet.
+	StatusQueued TaskStatus = "queued"
+
+	// StatusProcessing means a worker has claimed the task via XREADGROUP
+	// and is actively running image operations on it.
+	// If the worker crashes before completing, the task stays here and
+	// will be reclaimed by the health-check / claim-idle loop.
 	StatusProcessing TaskStatus = "processing"
-	StatusCompleted  TaskStatus = "completed"
-	StatusFailed     TaskStatus = "failed"
-	StatusRetrying   TaskStatus = "retrying"
-	StatusCancelled  TaskStatus = "cancelled"
+
+	// StatusCompleted means the worker finished without error and wrote
+	// a result JSON blob to the Result field. The output file is accessible
+	// via the URL inside Result.
+	StatusCompleted TaskStatus = "completed"
+
+	// StatusFailed means the task exhausted all retry attempts
+	// (Retries >= MaxRetries) and the Error field holds the last error message.
+	StatusFailed TaskStatus = "failed"
+
+	// StatusRetrying means the worker encountered a transient error and has
+	// scheduled another attempt. Retries is incremented on each attempt;
+	// once it reaches MaxRetries the status moves to StatusFailed.
+	StatusRetrying TaskStatus = "retrying"
+
+	// StatusCancelled means a user or admin explicitly cancelled the task
+	// before (or during) processing. A cancelled task is never retried.
+	StatusCancelled TaskStatus = "cancelled"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Task type — which image operation to run
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TaskType is a typed string that identifies which processing function the
+// worker should invoke. The worker's dispatch switch uses these constants to
+// route each task to the correct handler in processor/image_processor.go.
 type TaskType string
 
 const (
-	TaskImageResize     TaskType = "image_resize"
-	TaskImageCompress   TaskType = "image_compress"
-	TaskImageWatermark  TaskType = "image_watermark"
-	TaskImageFilter     TaskType = "image_filter"
-	TaskImageThumbnail  TaskType = "image_thumbnail"
-	TaskImageFormat     TaskType = "image_format_convert"
-	TaskImageCrop       TaskType = "image_crop"
+	// TaskImageResize resizes an image to specific pixel dimensions.
+	// Payload: ImageResizePayload.
+	TaskImageResize TaskType = "image_resize"
+
+	// TaskImageCompress reduces file size by lowering JPEG/WebP quality.
+	// Payload: ImageCompressPayload.
+	TaskImageCompress TaskType = "image_compress"
+
+	// TaskImageWatermark overlays a second image (logo/text) on top of
+	// the source image at a specified position and opacity.
+	// Payload: ImageWatermarkPayload.
+	TaskImageWatermark TaskType = "image_watermark"
+
+	// TaskImageFilter applies a visual effect (grayscale, sepia, blur …)
+	// to the source image.
+	// Payload: ImageFilterPayload.
+	TaskImageFilter TaskType = "image_filter"
+
+	// TaskImageThumbnail creates a small preview image, optionally cropped
+	// to fill a square or rectangular frame.
+	// Payload: ImageThumbnailPayload.
+	TaskImageThumbnail TaskType = "image_thumbnail"
+
+	// TaskImageFormat converts the image to a different format (jpeg, png,
+	// webp, gif, avif …).
+	// Payload: ImageCompressPayload (reuses quality + format fields).
+	TaskImageFormat TaskType = "image_format_convert"
+
+	// TaskImageCrop cuts a rectangular region from the source image.
+	// Payload: ImageCropPayload.
+	TaskImageCrop TaskType = "image_crop"
+
+	// TaskImageResponsive produces multiple widths from one download,
+	// enabling <picture> / srcset responsive images.
+	// Payload: ImageResponsivePayload.
 	TaskImageResponsive TaskType = "image_responsive"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Core domain type
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Task represents a single unit of async work. Each task belongs to a user and
 // optionally to a Batch when submitted via the batch endpoint.
+//
+// Fields explained:
+//
+//	ID             — UUID primary key; generated by the API before DB insert.
+//	UserID         — foreign key into the users table; used for access control
+//	                 so users can only see their own tasks.
+//	BatchID        — optional; links the task to a Batch row when submitted
+//	                 through POST /api/v1/tasks/batch.
+//	Type           — which image operation to run; drives the worker's dispatch.
+//	Payload        — raw JSON specific to the task type (e.g. source URL, width).
+//	                 Kept as json.RawMessage so it round-trips without decoding.
+//	Status         — current lifecycle state; see TaskStatus constants above.
+//	Priority       — 1 (low) → 10 (high); higher-priority tasks are placed in
+//	                 a separate Redis Stream and consumed first by workers.
+//	Result         — raw JSON written by the worker on success; contains
+//	                 output URLs, file sizes, dimensions.
+//	Error          — human-readable error from the last failed attempt.
+//	Retries        — number of attempts made so far (starts at 0).
+//	MaxRetries     — maximum allowed attempts before permanent failure.
+//	CreatedAt      — when the API accepted the task; used for queue-age metrics.
+//	StartedAt      — when a worker first claimed the task; pointer so it can be
+//	                 NULL in the DB before processing begins.
+//	CompletedAt    — when the worker finished (success or permanent failure).
+//	WorkerID       — which worker instance processed this task; useful for
+//	                 debugging failures on a specific machine.
+//	ProcessingTime — wall-clock milliseconds taken by the worker; stored for
+//	                 the avg_processing_time metric in SystemMetrics.
 type Task struct {
 	ID             string          `json:"id" db:"id"`
 	UserID         string          `json:"user_id" db:"user_id"`
@@ -50,7 +157,12 @@ type Task struct {
 	ProcessingTime int64           `json:"processing_time,omitempty" db:"processing_time"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Batch — grouping multiple tasks into one logical submission
+// ─────────────────────────────────────────────────────────────────────────────
+
 // BatchStatus summarises the overall state of a batch of tasks.
+// It is derived by aggregating the statuses of all tasks in the batch.
 type BatchStatus string
 
 const (
@@ -63,6 +175,20 @@ const (
 
 // Batch groups multiple tasks submitted together so the caller can track overall
 // progress with a single ID instead of polling each task individually.
+//
+// Fields explained:
+//
+//	ID          — UUID primary key; returned to the client on submission.
+//	UserID      — owner of the batch; used for access control.
+//	Type        — all tasks in a batch share the same operation type.
+//	Status      — aggregate status derived from the counters below.
+//	Total       — number of tasks in this batch; set once on creation.
+//	Queued      — tasks not yet started.
+//	Processing  — tasks currently being worked on.
+//	Completed   — tasks that succeeded.
+//	Failed      — tasks that exhausted retries.
+//	CreatedAt   — when the batch was created.
+//	CompletedAt — when the last task finished (NULL until then).
 type Batch struct {
 	ID          string      `json:"id" db:"id"`
 	UserID      string      `json:"user_id" db:"user_id"`
@@ -79,6 +205,13 @@ type Batch struct {
 
 // BatchSubmitRequest is the body for POST /api/v1/tasks/batch.
 // Every item in Images gets its own Task with the same Type and priority.
+//
+// Fields explained:
+//
+//	Type       — applied to every task in the batch.
+//	Images     — one JSON payload per image; each becomes a separate Task row.
+//	Priority   — shared across all tasks in this batch.
+//	MaxRetries — how many times each task may be retried before failing.
 type BatchSubmitRequest struct {
 	Type       TaskType          `json:"type"`
 	Images     []json.RawMessage `json:"images"`     // one payload per image
@@ -87,6 +220,13 @@ type BatchSubmitRequest struct {
 }
 
 // BatchSubmitResponse is returned after a successful batch submission.
+//
+// Fields explained:
+//
+//	BatchID   — use this to poll GET /api/v1/tasks/batch/{id} for progress.
+//	Total     — how many individual tasks were created.
+//	Status    — always "queued" immediately after submission.
+//	CreatedAt — server-side creation timestamp.
 type BatchSubmitResponse struct {
 	BatchID   string    `json:"batch_id"`
 	Total     int       `json:"total"`
@@ -94,6 +234,20 @@ type BatchSubmitResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Task-specific payload structs — one per TaskType
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ImageResizePayload is the JSON payload for TaskImageResize.
+//
+// Fields explained:
+//
+//	SourceURL      — publicly accessible URL of the image to download.
+//	Width          — target width in pixels.
+//	Height         — target height in pixels.
+//	MaintainAspect — if true, scale proportionally so neither dimension exceeds
+//	                 the target; the output may be smaller than requested.
+//	OutputFormat   — optional override (e.g. "webp"); defaults to source format.
 type ImageResizePayload struct {
 	SourceURL      string `json:"source_url"`
 	Width          int    `json:"width"`
@@ -103,7 +257,16 @@ type ImageResizePayload struct {
 }
 
 // ImageCompressPayload supports both fixed quality and target-size compression.
-// If TargetSizeBytes > 0 it overrides Quality and binary-searches for the right quality.
+// If TargetSizeBytes > 0 it overrides Quality and binary-searches for the right
+// quality level — useful when you need the file to fit under a specific limit.
+//
+// Fields explained:
+//
+//	SourceURL       — URL of the source image.
+//	Quality         — JPEG/WebP quality 1–100 (80 is a good default).
+//	Format          — output format string ("jpeg", "webp", "png" …).
+//	TargetSizeBytes — if set, ignore Quality and find the highest quality
+//	                  that keeps the file at or below this byte count.
 type ImageCompressPayload struct {
 	SourceURL       string `json:"source_url"`
 	Quality         int    `json:"quality"`
@@ -111,6 +274,15 @@ type ImageCompressPayload struct {
 	TargetSizeBytes int64  `json:"target_size_bytes,omitempty"`
 }
 
+// ImageWatermarkPayload overlays a logo or translucent image on the source.
+//
+// Fields explained:
+//
+//	SourceURL    — the base image to watermark.
+//	WatermarkURL — URL of the overlay image (PNG with transparency works best).
+//	Position     — where to place the watermark: "center", "top-left",
+//	               "top-right", "bottom-left", "bottom-right".
+//	Opacity      — 0.0 (invisible) to 1.0 (fully opaque).
 type ImageWatermarkPayload struct {
 	SourceURL    string  `json:"source_url"`
 	WatermarkURL string  `json:"watermark_url"`
@@ -118,14 +290,31 @@ type ImageWatermarkPayload struct {
 	Opacity      float64 `json:"opacity"`
 }
 
+// ImageFilterPayload applies a named visual effect to the source image.
+//
+// Fields explained:
+//
+//	SourceURL  — URL of the image to transform.
+//	FilterType — name of the effect: "grayscale", "sepia", "blur", "sharpen",
+//	             "brightness", "contrast", "saturation", "invert", "pixelate".
+//	Params     — optional effect-specific parameters (e.g. blur radius, strength).
 type ImageFilterPayload struct {
-	SourceURL  string                 `json:"source_url"`
-	FilterType string                 `json:"filter_type"`
+	SourceURL  string         `json:"source_url"`
+	FilterType string         `json:"filter_type"`
 	Params     map[string]any `json:"params,omitempty"`
 }
 
-// ImageThumbnailPayload supports both square (Size) and rectangular (Width x Height) thumbnails.
-// FitMode: "cover" (crop to fill, default) or "contain" (letterbox).
+// ImageThumbnailPayload supports both square (Size) and rectangular
+// (Width x Height) thumbnails.
+//
+// Fields explained:
+//
+//	SourceURL — URL of the source image.
+//	Size      — shorthand for a square thumbnail; sets both Width and Height.
+//	Width     — explicit output width; used when Size is 0.
+//	Height    — explicit output height; used when Size is 0.
+//	FitMode   — "cover" (crop to fill, default) preserves aspect by cropping
+//	            the centre; "contain" letterboxes within the bounds.
 type ImageThumbnailPayload struct {
 	SourceURL string `json:"source_url"`
 	Size      int    `json:"size,omitempty"`   // square shorthand
@@ -134,7 +323,19 @@ type ImageThumbnailPayload struct {
 	FitMode   string `json:"fit_mode,omitempty"`
 }
 
+// ImageFormatPayload reuses ImageCompressPayload because format conversion
+// optionally accepts a quality level for lossy formats.
+// (Type alias exists in comments only; the struct is the same.)
+
 // ImageCropPayload crops a rectangular region from the source image.
+//
+// Fields explained:
+//
+//	SourceURL    — URL of the source image.
+//	X, Y         — top-left corner of the crop box in pixels from the image origin.
+//	Width        — width of the crop box in pixels.
+//	Height       — height of the crop box in pixels.
+//	OutputFormat — optional format override for the cropped output.
 type ImageCropPayload struct {
 	SourceURL    string `json:"source_url"`
 	X            int    `json:"x"`
@@ -144,8 +345,16 @@ type ImageCropPayload struct {
 	OutputFormat string `json:"output_format,omitempty"`
 }
 
-// ImageResponsivePayload produces multiple resized outputs from a single download.
-// Returns one output URL per requested width in the result.
+// ImageResponsivePayload produces multiple resized outputs from a single
+// download — one output file per requested width. Useful for generating
+// srcset images without redownloading the source for each size.
+//
+// Fields explained:
+//
+//	SourceURL    — URL of the high-resolution source image.
+//	Widths       — list of pixel widths to generate (e.g. [320, 640, 1280]).
+//	OutputFormat — optional format for all outputs; defaults to source format.
+//	Quality      — compression quality for lossy formats; defaults to 85.
 type ImageResponsivePayload struct {
 	SourceURL    string `json:"source_url"`
 	Widths       []int  `json:"widths"`
@@ -153,15 +362,39 @@ type ImageResponsivePayload struct {
 	Quality      int    `json:"quality,omitempty"`       // default: 85
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Result types — written by the worker on task completion
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TaskResult is stored as JSON in the Task.Result column after a successful
+// processing run.
+//
+// Fields explained:
+//
+//	OutputURL   — URL of the single processed output file; populated for all
+//	              task types except image_responsive.
+//	OutputURLs  — list of per-width outputs for image_responsive tasks.
+//	FileSize    — size of the output file in bytes; helps clients skip re-download.
+//	Dimensions  — pixel width and height of the output image.
+//	ProcessedAt — server timestamp when the worker finished; used in audit logs.
+//	Metadata    — arbitrary key/value pairs the worker can attach (e.g. EXIF data).
 type TaskResult struct {
-	OutputURL    string                 `json:"output_url,omitempty"`
-	OutputURLs   []ResponsiveOutput     `json:"output_urls,omitempty"` // for image_responsive
-	FileSize     int64                  `json:"file_size,omitempty"`
-	Dimensions   *ImageDimensions       `json:"dimensions,omitempty"`
-	ProcessedAt  time.Time              `json:"processed_at"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	OutputURL   string             `json:"output_url,omitempty"`
+	OutputURLs  []ResponsiveOutput `json:"output_urls,omitempty"` // for image_responsive
+	FileSize    int64              `json:"file_size,omitempty"`
+	Dimensions  *ImageDimensions   `json:"dimensions,omitempty"`
+	ProcessedAt time.Time          `json:"processed_at"`
+	Metadata    map[string]any     `json:"metadata,omitempty"`
 }
 
+// ResponsiveOutput holds the result of one width variant in a responsive set.
+//
+// Fields explained:
+//
+//	Width     — the pixel width that was generated.
+//	Height    — the resulting pixel height after proportional scaling.
+//	OutputURL — URL of this variant's file.
+//	FileSize  — byte size of this variant's file.
 type ResponsiveOutput struct {
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
@@ -169,11 +402,34 @@ type ResponsiveOutput struct {
 	FileSize  int64  `json:"file_size"`
 }
 
+// ImageDimensions holds the width and height of an image in pixels.
+// Used inside TaskResult to report output dimensions to callers.
 type ImageDimensions struct {
 	Width  int `json:"width"`
 	Height int `json:"height"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Metrics structs — used by monitoring and the /metrics API endpoint
+// ─────────────────────────────────────────────────────────────────────────────
+
+// WorkerMetrics reports the live state of a single worker process.
+// Each worker writes this row to the workers table on startup and
+// updates it every heartbeat interval (default 30 s).
+//
+// Fields explained:
+//
+//	WorkerID         — unique identifier (hostname + PID) so we can tell
+//	                   replicas apart in the dashboard.
+//	Status           — "active" while running, "idle" when waiting for tasks.
+//	TasksProcessed   — cumulative count of successfully completed tasks since
+//	                   the worker started; used to compute throughput.
+//	TasksFailed      — cumulative failed tasks; used for error rate monitoring.
+//	LastHeartbeat    — timestamp of the last DB write; if this falls > 2 minutes
+//	                   behind wall clock the API marks the worker as offline.
+//	StartTime        — when this worker process started; useful for uptime.
+//	CurrentTask      — ID of the task being processed right now (NULL when idle).
+//	ActiveGoroutines — number of goroutines inside this worker; helps detect leaks.
 type WorkerMetrics struct {
 	WorkerID         string    `json:"worker_id" db:"worker_id"`
 	Status           string    `json:"status" db:"status"`
@@ -185,6 +441,20 @@ type WorkerMetrics struct {
 	ActiveGoroutines int       `json:"active_goroutines" db:"active_goroutines"`
 }
 
+// SystemMetrics aggregates cluster-wide task queue health into a single
+// snapshot. Returned by GET /api/v1/metrics and consumed by the React
+// MetricsCard component.
+//
+// Fields explained:
+//
+//	QueuedTasks       — tasks currently waiting in Redis Streams (not yet claimed).
+//	ProcessingTasks   — tasks claimed by a worker but not yet finished.
+//	CompletedTasks    — total tasks that have reached StatusCompleted.
+//	FailedTasks       — total tasks that have reached StatusFailed.
+//	ActiveWorkers     — number of workers whose LastHeartbeat is recent (< 2 min).
+//	Throughput        — tasks completed per second over the last minute window.
+//	AvgProcessingTime — mean milliseconds per task over recent completions.
+//	Timestamp         — when this snapshot was taken; lets clients detect stale data.
 type SystemMetrics struct {
 	QueuedTasks       int64     `json:"queued_tasks"`
 	ProcessingTasks   int64     `json:"processing_tasks"`
@@ -196,6 +466,18 @@ type SystemMetrics struct {
 	Timestamp         time.Time `json:"timestamp"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP request / response envelopes
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SubmitTaskRequest is the JSON body for POST /api/v1/tasks.
+//
+// Fields explained:
+//
+//	Type       — which image operation to perform.
+//	Payload    — operation-specific parameters (see payload structs above).
+//	Priority   — 1–10; higher numbers are processed first; default 5.
+//	MaxRetries — how many times to retry on transient errors; default 3.
 type SubmitTaskRequest struct {
 	Type       TaskType        `json:"type"`
 	Payload    json.RawMessage `json:"payload"`
@@ -203,6 +485,14 @@ type SubmitTaskRequest struct {
 	MaxRetries int             `json:"max_retries"`
 }
 
+// SubmitTaskResponse is returned on a successful POST /api/v1/tasks.
+//
+// Fields explained:
+//
+//	TaskID    — use this to poll GET /api/v1/tasks/{id} for status updates.
+//	Status    — always "queued" immediately after submission.
+//	Message   — human-readable confirmation message.
+//	CreatedAt — server timestamp; useful for calculating queue age.
 type SubmitTaskResponse struct {
 	TaskID    string     `json:"task_id"`
 	Status    TaskStatus `json:"status"`
@@ -210,11 +500,21 @@ type SubmitTaskResponse struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+// TaskStatusResponse wraps a full Task object in the GET /api/v1/tasks/{id}
+// response envelope. The Message field carries context on errors or special states.
 type TaskStatusResponse struct {
 	Task    *Task  `json:"task"`
 	Message string `json:"message,omitempty"`
 }
 
+// ListTasksResponse is the paginated response from GET /api/v1/tasks.
+//
+// Fields explained:
+//
+//	Tasks    — the slice of tasks for the current page.
+//	Total    — total matching tasks (needed to compute page count in the UI).
+//	Page     — the current 1-based page number.
+//	PageSize — how many tasks per page (matches the ?page_size query param).
 type ListTasksResponse struct {
 	Tasks    []*Task `json:"tasks"`
 	Total    int64   `json:"total"`
@@ -222,17 +522,61 @@ type ListTasksResponse struct {
 	PageSize int     `json:"page_size"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WebSocket messaging
+// ─────────────────────────────────────────────────────────────────────────────
+
+// WebSocketMessage is the envelope for every message pushed over the WebSocket
+// connection to the browser dashboard.
+//
+// The Type + Data pattern means clients can deserialise the envelope first,
+// then switch on Type to know how to parse Data — without needing a separate
+// WebSocket endpoint per event kind.
+//
+// Fields explained:
+//
+//	Type      — event discriminator, e.g. "task_update", "metrics_update",
+//	            "worker_status", "task_completed". The React Dashboard switches
+//	            on this to route the payload to the right component.
+//	Data      — the event payload; concrete type depends on Type. Using
+//	            interface{} allows any struct to be marshalled without a
+//	            wrapper union type.
+//	Timestamp — when the server emitted the event; lets the client detect lag.
 type WebSocketMessage struct {
 	Type      string      `json:"type"`
 	Data      interface{} `json:"data"`
 	Timestamp time.Time   `json:"timestamp"`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// User — authentication and authorisation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// User represents an authenticated account in the system.
+//
+// Fields explained:
+//
+//	ID            — UUID primary key; referenced by Task.UserID for ownership.
+//	Username      — display name; must be unique across all users.
+//	Email         — used for login; must be unique.
+//	Password      — bcrypt hash of the user's password.  The json:"-" tag
+//	                omits this field from every JSON response so hashes are
+//	                never accidentally sent to clients.
+//	APIKey        — an alternative to JWT for programmatic access; omitted from
+//	                JSON unless explicitly requested (e.g. on key creation).
+//	Roles         — RBAC role list; currently "user" and "admin" are recognised.
+//	                Admin role grants access to worker management and all-user
+//	                task listing endpoints.
+//	OAuthProvider — "google" or "github" if the account was created via OAuth;
+//	                empty for password accounts.
+//	OAuthID       — the provider-specific user ID used to match on subsequent
+//	                OAuth logins without requiring an email lookup.
+//	CreatedAt     — account creation timestamp; used in admin user lists.
 type User struct {
 	ID            string    `json:"id" db:"id"`
 	Username      string    `json:"username" db:"username"`
 	Email         string    `json:"email" db:"email"`
-	Password      string    `json:"-" db:"password"`
+	Password      string    `json:"-" db:"password"`            // never serialised to JSON
 	APIKey        string    `json:"api_key,omitempty" db:"api_key"`
 	Roles         []string  `json:"roles" db:"roles"`
 	OAuthProvider string    `json:"oauth_provider,omitempty" db:"oauth_provider"`

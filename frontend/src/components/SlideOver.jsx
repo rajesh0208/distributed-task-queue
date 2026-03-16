@@ -1,9 +1,41 @@
-// src/components/SlideOver.jsx
+/**
+ * src/components/SlideOver.jsx
+ *
+ * A slide-in panel that displays the full details of a selected task.
+ * Rendered when a user clicks a row in TaskTable.
+ *
+ * Layout:
+ *   - Fixed full-screen overlay with a semi-transparent black backdrop.
+ *   - A white panel slides in from the right edge (max-w-lg).
+ *   - Header: "Task Details" + close button.
+ *   - Body: scrollable list of labelled fields (ID, type, status, payload, error, etc.).
+ *
+ * Slide animation:
+ *   translate-x-0 (open=true) / translate-x-full (open=false) combined with
+ *   Tailwind's `transition-transform duration-300` CSS transition.
+ *   React renders this component whenever `open` changes, and the CSS handles
+ *   the visual slide-in/out. When `open` is false AND `task` is null, we
+ *   return null immediately to avoid rendering an invisible overlay that still
+ *   intercepts pointer events.
+ *
+ * Payload display:
+ *   task.payload can be a raw JSON string (stored as TEXT in PostgreSQL) or
+ *   a JS object (if the axios response already parsed nested JSON). Both are
+ *   handled: strings are displayed as-is; objects are pretty-printed with
+ *   JSON.stringify.
+ *
+ * Props:
+ *   open    — boolean controlling visibility.
+ *   task    — the task object to display; null means "no task selected".
+ *   onClose — called when the user clicks the backdrop or the X button.
+ */
 
 import React from 'react'
 import clsx from 'clsx'
 
 export default function SlideOver({ open, task, onClose }) {
+  // Guard: if not open or no task selected, render nothing so the overlay doesn't
+  // block pointer events on the dashboard behind it.
   if (!open || !task) return null
 
   return (

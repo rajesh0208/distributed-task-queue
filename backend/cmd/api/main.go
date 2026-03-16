@@ -1,3 +1,74 @@
+// Package main is the entry point for the distributed task queue API server.
+//
+// This file (cmd/api/main.go) wires every dependency together and serves the HTTP API.
+//
+// Why Fiber instead of standard net/http?
+//   Fiber is built on fasthttp, which uses a zero-allocation request/response path:
+//   instead of allocating a new net/http.Request per connection, fasthttp reuses
+//   a pool of *fasthttp.RequestCtx objects. Under high concurrency (hundreds of
+//   concurrent image submissions), this dramatically reduces GC pressure.
+//   Trade-off: Fiber's context is NOT compatible with net/http middleware; adaptor/v2
+//   is used where bridging is required (e.g. Prometheus handler, GraphQL handler).
+//
+// Dependency injection order (why the order matters):
+//   1. Redis broker    — needed by the storage layer for caching AND by auth/rate-limit.
+//                        Must be the first dependency because everything downstream reuses its client.
+//   2. Postgres storage — depends on Redis (for the write-through cache). Must be ready
+//                        before handlers can persist or query tasks/users.
+//   3. Auth + rate limiter — depend on the Redis client from step 1. Must be wired before
+//                        handlers are registered so middleware is available.
+//   4. WebSocket hub   — starts its background goroutine; must exist before setupRoutes so
+//                        handlers can call broadcastTaskUpdate without a nil pointer.
+//   5. Fiber app + routes — registered last, after all dependencies are live. This ensures
+//                        that the very first request that arrives can be served correctly.
+//
+// Middleware chain order (why the order matters):
+//   recover → tracingMiddleware → logger → cors → PrometheusMiddleware → RateLimitMiddleware → AuthMiddleware
+//
+//   - recover FIRST: catches panics in every middleware and handler below it.
+//     If tracing or logging panics, recover catches it instead of crashing.
+//   - tracingMiddleware SECOND: creates the OTel server span before any other work.
+//     All subsequent middleware and handlers run inside this span and can add attributes.
+//   - logger THIRD: logs after tracing so the trace ID is available in the context.
+//   - cors FOURTH: must reply to OPTIONS preflight BEFORE auth/rate-limit run.
+//     If auth ran first and rejected an OPTIONS request (no token), browsers would
+//     block the subsequent real request as a CORS failure.
+//   - PrometheusMiddleware FIFTH: records every request regardless of auth status
+//     so unauthenticated 401s are counted alongside normal 200s.
+//   - RateLimitMiddleware applied to the API group: enforces per-IP limits on public
+//     auth endpoints AND on authenticated routes.
+//   - AuthMiddleware applied to the protected sub-group ONLY: runs after rate-limiting
+//     so even unauthenticated requests count against the rate limit (preventing
+//     token brute-forcing via high-speed unauthenticated requests).
+//
+// Route structure:
+//   /api/v1/health      — public readiness probe (no auth, no rate limit)
+//   /metrics            — public Prometheus scrape endpoint
+//   /api/v1/auth/…      — public + rate-limited (login, register, oauth)
+//   /api/v1/…           — protected + rate-limited (tasks, users/me, ws, metrics/system)
+//   /api/v1/users/…     — protected + rate-limited + admin-role-required
+//
+// WebSocket hub goroutine:
+//   go wsHub.Run() starts a dedicated event loop goroutine.
+//   All map mutations (register/unregister/broadcast) are serialized through channels
+//   in this single goroutine, avoiding data races. Only the broadcast loop uses RLock
+//   to snapshot the client slice before releasing the lock, so slow WebSocket writes
+//   do not block other channel operations.
+//
+// It connects to:
+//   - internal/broker         — Redis Streams message queue
+//   - internal/storage        — PostgreSQL + Redis storage layer
+//   - internal/security       — JWT auth, bcrypt, rate limiting, SSRF validation
+//   - internal/monitoring     — Prometheus metrics middleware
+//   - internal/reliability    — health checks, graceful shutdown
+//   - internal/tracing        — OpenTelemetry spans
+//   - internal/graphql        — optional GraphQL API endpoint
+//   - internal/oauth          — Google and GitHub OAuth2
+//   - internal/logging        — structured slog initialization
+//
+// Startup sequence:
+//   main() → logging.Init → tracing.Init → NewAPIServer → server.Start (goroutine)
+//         → wait for SIGTERM/SIGINT → server.Shutdown → exit
 package main
 
 import (
@@ -941,12 +1012,17 @@ func (s *APIServer) broadcastTaskUpdate(task *models.Task) {
 	}
 }
 
-// customErrorHandler replaces Fiber's default plain-text error responses with structured JSON.
-// It also increments the Prometheus error counter for every error, broken down by HTTP status code.
 // tracingMiddleware creates an OTel server span for every HTTP request.
 // It extracts incoming W3C trace context from request headers (set by upstream load balancers
 // or the browser via OpenTelemetry JS SDK) and stores the enriched context in c.UserContext()
 // so downstream handlers can start child spans or inject the context into broker messages.
+//
+// Why extract from headers?
+//   When an upstream proxy or browser sets "traceparent: 00-<trace-id>-<span-id>-01", this
+//   middleware creates a child span under that parent trace. Without extraction, every request
+//   would start a new root trace and distributed tracing across services would be impossible.
+//
+// Called by: NewAPIServer via app.Use(tracingMiddleware()).
 func tracingMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Collect request headers into a plain map for OTel extraction.
@@ -1295,6 +1371,23 @@ func deriveUsername(name string) string {
 	return string(result)
 }
 
+// customErrorHandler replaces Fiber's default plain-text error responses with structured JSON.
+//
+// Why a custom error handler instead of Fiber's default?
+//   Fiber's default error handler returns plain text (e.g. "Internal Server Error").
+//   API clients expect JSON so they can parse the error message programmatically.
+//   This handler also increments the Prometheus error counter with the HTTP status code
+//   as a label, enabling per-status error rate alerting in Grafana.
+//
+// Error format returned to clients:
+//
+//	{ "error": "human readable message", "code": 404, "path": "/api/v1/tasks/xyz" }
+//
+// Parameters:
+//   c   — Fiber context for writing the response.
+//   err — the error from the handler chain; may be *fiber.Error (has Code) or a plain error (500).
+//
+// Called by: fiber.Config{ErrorHandler: customErrorHandler} in NewAPIServer.
 func customErrorHandler(c *fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError // default to 500 if the error isn't a fiber.Error
 	message := "internal server error"

@@ -1,20 +1,50 @@
+// Package processor implements image processing task handlers for the distributed task queue.
+//
 // File: internal/processor/image_processor.go
+//
+// What this file does:
+//   This file defines ImageProcessor — the component responsible for executing
+//   all eight image transformation task types. It is called by the worker process
+//   after a task is dequeued from the Redis Stream. For each task type, it:
+//     1. Decodes the JSON payload to get parameters (dimensions, quality, etc.)
+//     2. Downloads the source image over HTTP (with SSRF protection)
+//     3. Applies the requested transformation using the imaging library
+//     4. Saves the output to disk (with content-hash deduplication)
+//     5. Writes the result URL and metadata back to the task struct
+//
+// The 8 image operations supported:
+//   resize     — scale to exact or aspect-ratio-preserving dimensions
+//   compress   — reduce file size by lowering JPEG quality (exact or binary-search to target bytes)
+//   watermark  — overlay a second image at a specified corner with opacity control
+//   filter     — apply a photographic effect (grayscale, blur, sharpen, sepia, brightness, contrast, saturation)
+//   thumbnail  — fast square or cover/contain crop+scale for list views and avatars
+//   format     — transcode between jpeg, png, and webp
+//   crop       — extract an exact pixel rectangle from the source image
+//   responsive — generate multiple width variants in parallel for HTML srcset attributes
+//
+// Connected to:
+//   - cmd/worker/main.go   — instantiates ImageProcessor and calls ProcessTask per consumed task
+//   - internal/models      — task type constants and payload/result structs
+//   - internal/tracing     — OpenTelemetry span creation (Jaeger distributed tracing)
+//
+// Called by:
+//   - Worker goroutines: processor.ProcessTask(ctx, task) after dequeuing from Redis.
 package processor
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/sha256"  // used to compute content-hash filenames for deduplication
+	"encoding/hex"   // used to encode SHA-256 bytes as a hex filename string
 	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
-	_ "image/gif"
+	_ "image/gif"    // blank import registers GIF decoder in image.Decode's format registry
 	"io"
-	"mime"
+	"mime"           // used to parse Content-Type headers from HTTP image responses
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,38 +58,121 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/chai2010/webp"
-	"github.com/disintegration/imaging"
-	"github.com/rwcarlsen/goexif/exif"
-	_ "golang.org/x/image/webp" // register WebP decode
+	"github.com/chai2010/webp"               // WebP encoder (encoding; golang.org/x/image/webp is decoder-only)
+	"github.com/disintegration/imaging"       // high-quality image resizing, cropping, and filtering
+	"github.com/rwcarlsen/goexif/exif"        // reads EXIF metadata to detect camera orientation
+	_ "golang.org/x/image/webp"              // blank import registers WebP decoder in image.Decode
 )
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const (
-	DefaultMaxImageSize = 10 * 1024 * 1024 // 10 MB
-	DefaultMaxWidth     = 10000
-	DefaultMaxHeight    = 10000
-	MinDimension        = 1
+	// DefaultMaxImageSize is the maximum allowed source image download size (10 MB).
+	// Why 10 MB: large images cause proportionally large memory allocations during
+	// decode (an uncompressed 10 MP JPEG is ~30 MB in NRGBA memory). Capping the
+	// compressed download protects worker heap from runaway memory usage and also
+	// limits exposure to zip-bomb style attacks (tiny download, huge decoded image).
+	DefaultMaxImageSize = 10 * 1024 * 1024 // 10 MB in bytes
+
+	// DefaultMaxWidth and DefaultMaxHeight cap the decoded pixel dimensions of any
+	// source image. A 10000×10000 NRGBA image uses ~400 MB of RAM. This prevents
+	// workers from being killed by OOM for unusually large uploaded images.
+	DefaultMaxWidth  = 10000 // pixels
+	DefaultMaxHeight = 10000 // pixels
+
+	// MinDimension is the smallest valid value for any requested output dimension.
+	// A 0-pixel dimension would produce a degenerate image and likely panic in
+	// the imaging library's internal division operations.
+	MinDimension = 1 // pixel
 )
 
+// ── Struct ────────────────────────────────────────────────────────────────────
+
 // ImageProcessor handles image processing tasks.
+// It is instantiated once per worker process and shared across all task goroutines.
+// All fields are set at construction time and are read-only during processing,
+// making the struct safe for concurrent use.
 type ImageProcessor struct {
-	storageDir   string
-	baseURL      string
+	// storageDir is the local filesystem directory where processed images are saved.
+	// Workers write here; the API reads files from this directory to serve downloads.
+	storageDir string
+
+	// baseURL is the public HTTP prefix prepended to filenames to form OutputURLs
+	// returned to callers (e.g. "http://localhost:8080/uploads"). Must not have a
+	// trailing slash.
+	baseURL string
+
+	// maxImageSize is the maximum allowed compressed image size in bytes.
+	// Downloads exceeding this limit are rejected before decoding to prevent
+	// large allocations. Defaults to DefaultMaxImageSize (10 MB).
 	maxImageSize int64
-	maxWidth     int
-	maxHeight    int
-	httpClient   *http.Client
-	bufferPool   sync.Pool
+
+	// maxWidth and maxHeight are the maximum decoded pixel dimensions allowed
+	// for source images. Images exceeding these are rejected after decoding.
+	// Defaults to DefaultMaxWidth / DefaultMaxHeight (10000 px each).
+	maxWidth  int
+	maxHeight int
+
+	// httpClient is a shared, persistent HTTP client used for all image downloads.
+	//
+	// Why reuse instead of creating per-request: constructing a new http.Client
+	// per request also creates a new http.Transport, which cannot reuse TCP
+	// connections. Reusing the transport allows connection pooling (keep-alive),
+	// reducing latency and the number of file descriptors needed.
+	//
+	// Why not use http.DefaultClient: the default client has no timeout and shared
+	// transport settings. Using our own client lets us enforce a 30 s deadline and
+	// tune the connection pool for the expected concurrency.
+	httpClient *http.Client
+
+	// bufferPool is a pool of reusable *bytes.Buffer instances.
+	//
+	// Why buffer pooling reduces GC pressure:
+	//   Each image download reads tens of kilobytes to megabytes of data into a
+	//   buffer. Without pooling, every download allocates a new buffer, which the
+	//   GC must later collect. Under load with many concurrent workers, this creates
+	//   a steady stream of large short-lived allocations that triggers frequent GC
+	//   cycles, adding latency. sync.Pool lets completed goroutines donate their
+	//   buffer back so the next goroutine can reuse it — reusing already-allocated
+	//   memory instead of allocating fresh memory from the heap every time.
+	bufferPool sync.Pool
 }
 
-// NewImageProcessor creates a new image processor.
+// ── Constructor ───────────────────────────────────────────────────────────────
+
+// NewImageProcessor creates and returns a fully initialised ImageProcessor.
+// It also ensures storageDir exists on disk, creating it if necessary.
+//
+// Parameters:
+//   storageDir — local path where output images will be written (e.g. "./uploads")
+//   baseURL    — public URL prefix for constructing download URLs (e.g. "http://api:8080/uploads")
+//
+// Returns: *ImageProcessor ready to call ProcessTask on.
+// Called by: cmd/worker/main.go at worker startup.
 func NewImageProcessor(storageDir, baseURL string) *ImageProcessor {
+	// Create the storage directory with standard permissions (rwxr-xr-x).
+	// MkdirAll is idempotent — it does nothing if the directory already exists.
+	// Error is intentionally ignored here: if the directory cannot be created,
+	// later os.WriteFile calls will fail with a clear error message.
 	os.MkdirAll(storageDir, 0755)
 
+	// Configure a custom HTTP transport for connection pooling.
+	// Without an explicit transport, http.DefaultTransport is used, which is
+	// shared globally and may have been modified by other packages.
 	transport := &http.Transport{
-		MaxIdleConns:        100,
+		// MaxIdleConns is the maximum number of idle (keep-alive) connections
+		// across all hosts. 100 is generous for a single worker process.
+		MaxIdleConns: 100,
+
+		// MaxIdleConnsPerHost limits idle connections to any single origin.
+		// Since most images come from one or two hosts (the API server, or an
+		// object store), 10 idle connections per host avoids wasting file descriptors.
 		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
+
+		// IdleConnTimeout is how long an idle connection is kept open before
+		// being closed. 90 s is the Go default; connections idle longer than
+		// this are closed to free OS resources.
+		IdleConnTimeout: 90 * time.Second,
 	}
 
 	return &ImageProcessor{
@@ -70,9 +183,16 @@ func NewImageProcessor(storageDir, baseURL string) *ImageProcessor {
 		maxHeight:    DefaultMaxHeight,
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   30 * time.Second,
+			// Timeout is the total time limit for the entire request, including
+			// connection setup, sending the request, and reading the full body.
+			// 30 s is generous for images up to 10 MB over a local network but
+			// still protects against hung connections in degraded environments.
+			Timeout: 30 * time.Second,
 		},
 		bufferPool: sync.Pool{
+			// New is the factory function called when the pool is empty.
+			// It allocates a fresh bytes.Buffer. The pool will reuse existing
+			// buffers whenever a prior goroutine has returned one via Put().
 			New: func() any { return new(bytes.Buffer) },
 		},
 	}

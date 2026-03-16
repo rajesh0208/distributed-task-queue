@@ -1,3 +1,59 @@
+/**
+ * src/components/DashboardGraphQL.jsx
+ *
+ * An alternative dashboard view that fetches task and metrics data via
+ * GraphQL (Apollo Client) instead of the REST API used by Dashboard.jsx.
+ * This file demonstrates how to use both Apollo and plain axios in the same
+ * component for operations that have different transport requirements.
+ *
+ * # Why GraphQL for reads, axios for uploads?
+ *
+ *   Apollo Client (useQuery / useMutation) handles GraphQL over HTTP POST.
+ *   File uploads, however, require multipart/form-data which is not
+ *   natively supported by the graphql-go server. We therefore use a
+ *   two-step flow:
+ *
+ *     1. Upload the image via REST   POST /api/v1/upload  (axios, multipart)
+ *     2. Submit the task via GraphQL mutation SubmitTask  (Apollo)
+ *
+ *   After the upload, `response.data.url` is injected into the task payload's
+ *   `source_url` field so the worker knows where to fetch the image from.
+ *
+ * # Polling vs WebSocket subscriptions
+ *
+ *   useQuery is configured with `pollInterval: 5000` (5-second HTTP polling).
+ *   The graphql/client.js file shows the WebSocket subscription setup commented
+ *   out — subscriptions would give real-time push updates but require
+ *   `graphql-ws` and a matching server-side subscription resolver. Until those
+ *   are implemented, polling is the pragmatic fallback.
+ *
+ * # getDefaultPayload
+ *
+ *   Returns a type-safe starter object for each task type so the payload
+ *   textarea always shows valid JSON. Called:
+ *     (a) on mount (initial state for 'image_resize')
+ *     (b) when the task type select changes — avoids stale field names from
+ *         the previous type leaking into the new payload
+ *
+ * # Image preview (FileReader API)
+ *
+ *   handleFileSelect uses the browser's FileReader API to generate a
+ *   data: URL (base64-encoded image) for the <img> preview. This happens
+ *   entirely in the browser — no network request is made just for the preview.
+ *   The actual upload only happens when the user explicitly clicks "Upload".
+ *
+ * # Upload error handling
+ *
+ *   handleFileUpload detects 401 Unauthorized responses and clears the
+ *   localStorage token, forcing the user back to the Login screen on the
+ *   next page load. Generic errors are shown inline below the upload input.
+ *
+ * # Submit guard
+ *
+ *   The Submit button is disabled if a file is selected but not yet uploaded
+ *   (selectedFile && !uploadedUrl). This prevents submitting a task whose
+ *   payload.source_url is still empty.
+ */
 import React, { useState } from 'react'
 import { useQuery, useMutation } from '@apollo/client'
 import axios from 'axios'
@@ -6,11 +62,22 @@ import { SUBMIT_TASK, DELETE_TASK } from '../graphql/mutations'
 import TaskList from './TaskList'
 import MetricsCard from './MetricsCard'
 
-// Use relative path to go through Vite proxy
+// Use relative path so the Vite dev-server proxy forwards to http://localhost:8080.
+// In production, VITE_API_BASE should be set to the deployed API origin.
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
 function DashboardGraphQL() {
-  // Helper function to get default payload for each task type
+  /**
+   * getDefaultPayload — returns a starter payload object for the given task type.
+   *
+   * Why a function rather than a static map? The payload objects contain mutable
+   * default values (e.g. width: 400) that callers mutate when they set source_url.
+   * If we used a static map, every call would mutate the same shared object.
+   * Returning a fresh literal each time avoids that aliasing bug.
+   *
+   * @param {string} taskType — one of the image_* task type constants
+   * @returns {object} — a plain JS object with all required payload fields
+   */
   const getDefaultPayload = (taskType) => {
     switch (taskType) {
       case 'image_resize':
@@ -30,36 +97,45 @@ function DashboardGraphQL() {
     }
   }
 
+  // newTask holds the form state for the submission panel.
+  // payload is kept as a JSON string so the <textarea> stays editable as plain text.
   const [newTask, setNewTask] = useState({
     type: 'image_resize',
-    payload: JSON.stringify(getDefaultPayload('image_resize')),
+    payload: JSON.stringify(getDefaultPayload('image_resize')), // seed with default fields
     priority: 0,
     maxRetries: 3,
   })
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [uploading, setUploading] = useState(false)
-  const [preview, setPreview] = useState(null)
-  const [uploadedUrl, setUploadedUrl] = useState(null)
-  const [error, setError] = useState(null)
+  const [selectedFile, setSelectedFile] = useState(null)   // File object chosen in the input
+  const [uploading, setUploading] = useState(false)         // true while the axios upload is in-flight
+  const [preview, setPreview] = useState(null)              // data: URL for the in-browser image preview
+  const [uploadedUrl, setUploadedUrl] = useState(null)      // server URL returned after successful upload
+  const [error, setError] = useState(null)                  // user-facing error message string
 
+  // GET_TASKS is polled every 5 s — no WebSocket subscriptions wired up yet.
+  // refetchTasks is called after a successful submitTask mutation to force an
+  // immediate refresh rather than waiting for the next poll tick.
   const { data: tasksData, loading: tasksLoading, refetch: refetchTasks } = useQuery(
     GET_TASKS,
     {
-      variables: { page: 1, pageSize: 20 },
-      pollInterval: 5000,
+      variables: { page: 1, pageSize: 20 }, // first page of 20 tasks
+      pollInterval: 5000,                   // re-fetch every 5 000 ms
     }
   )
 
+  // Metrics query — same polling interval as tasks so the counters stay in sync.
   const { data: metricsData, loading: metricsLoading } = useQuery(GET_METRICS, {
     pollInterval: 5000,
   })
 
+  // submitTask mutation — onCompleted fires after the server ACKs the new task.
+  // We reset the form here (not in handleSubmitTask) so the reset is tied to
+  // the server response, not the local submit click.
   const [submitTask] = useMutation(SUBMIT_TASK, {
     onCompleted: () => {
-      refetchTasks()
+      refetchTasks()       // immediate refresh so the new task appears in the list
       setNewTask({
         type: newTask.type,
-        payload: JSON.stringify(getDefaultPayload(newTask.type)),
+        payload: JSON.stringify(getDefaultPayload(newTask.type)), // reset to defaults
         priority: 0,
         maxRetries: 3,
       })
@@ -69,19 +145,42 @@ function DashboardGraphQL() {
     },
   })
 
+  /**
+   * handleFileSelect — invoked when the user picks a file in the <input type="file">.
+   *
+   * Uses the browser FileReader API to generate a data: URL for the preview
+   * <img> tag. readAsDataURL encodes the file as base64 in a single async read;
+   * reader.onloadend fires with the result once the encoding is done.
+   *
+   * No network request is made here — that only happens in handleFileUpload.
+   */
   const handleFileSelect = (e) => {
     const file = e.target.files[0]
     if (file) {
       setSelectedFile(file)
-      // Create preview
+      // FileReader reads the file from disk into memory and encodes it as
+      // a data: URI so we can show a live preview before uploading.
       const reader = new FileReader()
       reader.onloadend = () => {
-        setPreview(reader.result)
+        setPreview(reader.result) // reader.result is the full data:image/... string
       }
       reader.readAsDataURL(file)
     }
   }
 
+  /**
+   * handleFileUpload — uploads the selected file to the REST endpoint
+   * POST /api/v1/upload using multipart/form-data (axios).
+   *
+   * After a successful upload the server returns { url: "/images/<uuid>.ext" }.
+   * We inject that URL into payload.source_url so the worker knows where to
+   * fetch the input image from.
+   *
+   * Auth: reads the JWT from localStorage and sets the Authorization header.
+   * A 401 response (or "token"/"unauthorized" in the error message) is treated
+   * as a session expiry — the stored token is cleared and the user is asked
+   * to log in again.
+   */
   const handleFileUpload = async () => {
     if (!selectedFile) return
 
@@ -89,16 +188,18 @@ function DashboardGraphQL() {
     try {
       const token = localStorage.getItem('token')
       const formData = new FormData()
-      formData.append('file', selectedFile)
+      formData.append('file', selectedFile)  // key must match what the Go handler expects
 
       const response = await axios.post(`${API_BASE}/upload`, formData, {
         headers: {
           Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data',
+          'Content-Type': 'multipart/form-data',  // tells axios not to JSON-encode the body
         },
       })
 
-      // Update payload with uploaded file URL
+      // Inject the server-assigned URL into the payload so the worker can
+      // find the image. We parse → mutate → re-stringify to preserve any
+      // other fields the user may have edited in the textarea.
       const payload = JSON.parse(newTask.payload)
       payload.source_url = response.data.url
       setNewTask({
@@ -106,7 +207,7 @@ function DashboardGraphQL() {
         payload: JSON.stringify(payload),
       })
 
-      setUploadedUrl(response.data.url)
+      setUploadedUrl(response.data.url)   // show the green "uploaded" confirmation
       setError(null)
       setSelectedFile(null)
       setPreview(null)
@@ -114,6 +215,8 @@ function DashboardGraphQL() {
     } catch (err) {
       console.error('Failed to upload file:', err)
       const errorMsg = err.response?.data?.error || err.message || 'Upload failed'
+      // Treat any auth-related error as a session expiry — clear the token so
+      // the user is redirected to Login on their next interaction.
       if (errorMsg.includes('token') || errorMsg.includes('unauthorized') || err.response?.status === 401) {
         setError('Authentication required. Please refresh the page and login again.')
         localStorage.removeItem('token')
@@ -124,11 +227,25 @@ function DashboardGraphQL() {
     }
   }
 
+  /**
+   * handleSubmitTask — validates the payload then dispatches the GraphQL mutation.
+   *
+   * Validation: payload must be valid JSON AND must have a non-empty source_url.
+   * The two different error messages guide the user toward the correct action:
+   *   - file selected but not uploaded → remind them to click Upload first
+   *   - no file and no URL             → remind them to provide a URL manually
+   *
+   * On success, Apollo's onCompleted callback (wired in useMutation above) resets
+   * the form and calls refetchTasks — so we only need to clear local ephemeral
+   * state here.
+   */
   const handleSubmitTask = async (e) => {
     e.preventDefault()
     try {
-      const payload = JSON.parse(newTask.payload)
+      const payload = JSON.parse(newTask.payload)   // throws SyntaxError if user edited to invalid JSON
       if (!payload.source_url) {
+        // Distinguish between "file staged but not uploaded" and "nothing provided at all"
+        // so the error message is actionable rather than generic.
         if (selectedFile && !uploadedUrl) {
           setError('Please click "Upload" button first to upload the selected image')
         } else {
@@ -140,11 +257,12 @@ function DashboardGraphQL() {
       await submitTask({
         variables: {
           type: newTask.type,
-          payload: newTask.payload,
+          payload: newTask.payload,   // serialized JSON string — the GraphQL scalar type is String
           priority: newTask.priority,
           maxRetries: newTask.maxRetries,
         },
       })
+      // Clear upload-related state; form reset is handled in onCompleted above.
       setSelectedFile(null)
       setPreview(null)
       setUploadedUrl(null)

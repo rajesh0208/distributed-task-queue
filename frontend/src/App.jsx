@@ -1,5 +1,48 @@
-// src/App.jsx
-// Root component — handles auth state, OAuth callback token pickup, and top-level layout.
+/**
+ * src/App.jsx
+ *
+ * Root component — owns the global authentication state and renders either
+ * the Login screen or the authenticated Dashboard layout.
+ *
+ * # Authentication state machine
+ *
+ *   checkingAuth=true   (initial)   → render spinner, do NOT flash Login
+ *   checkingAuth=false, isAuth=false → render <Login>
+ *   checkingAuth=false, isAuth=true  → render navbar + <Dashboard>
+ *
+ *   The `checkingAuth` flag exists to prevent a one-frame flash of the Login
+ *   form on page load when the user is actually already logged in (token in
+ *   localStorage). Without it, the component would briefly show Login before
+ *   the useEffect fires and sets isAuthenticated=true.
+ *
+ * # OAuth callback token pickup
+ *
+ *   After a successful Google/GitHub OAuth login, the Go backend redirects
+ *   the browser to:
+ *
+ *     http://localhost:3001/?token=<signed-jwt>
+ *
+ *   The useEffect reads the `token` query param, stores it in localStorage
+ *   (same location as the password-based login flow), then calls
+ *   window.history.replaceState to remove the token from the URL bar. This
+ *   prevents the JWT from appearing in browser history or server logs if the
+ *   user navigates back.
+ *
+ * # handleLogin / handleLogout
+ *
+ *   handleLogin(token)  — called by <Login> after a successful POST /auth/login.
+ *                         Stores token in localStorage and flips isAuthenticated.
+ *   handleLogout()      — removes token from localStorage and returns to Login.
+ *                         Does NOT call a server-side logout endpoint because
+ *                         JWTs are stateless; the token simply expires.
+ *
+ * # Layout structure
+ *
+ *   <div h-screen flex flex-col>   ← full-viewport container, prevents scroll
+ *     <nav flex-shrink-0>          ← fixed-height header (56 px / h-14)
+ *     <main flex-1 overflow-hidden> ← takes all remaining vertical space;
+ *                                     Dashboard's inner scroll handles overflow
+ */
 
 import React, { useState, useEffect } from 'react'
 import Dashboard from './components/Dashboard'

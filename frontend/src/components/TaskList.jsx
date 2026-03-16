@@ -1,59 +1,137 @@
-// src/components/TaskList.jsx
-// Task table with colour-coded status badges, an eye-button to preview the
-// processed image in a modal, and a download button for completed tasks.
+/**
+ * src/components/TaskList.jsx
+ *
+ * Task table with colour-coded status badges, an eye-button to preview the
+ * processed image in a modal, and a download button for completed tasks.
+ *
+ * Component responsibilities:
+ *   - Renders a styled HTML table of task rows, one row per task in the `tasks` prop.
+ *   - STATUS_STYLES maps each task status to a Tailwind badge colour so engineers
+ *     can instantly identify failed (red), processing (blue), and completed (green) tasks.
+ *   - Preview modal (PreviewModal) renders the output image inline in a fixed overlay,
+ *     allowing users to visually verify results without leaving the dashboard.
+ *   - Download button: fetches the image as a Blob via the Fetch API and triggers a
+ *     browser download. Falls back to window.open if the fetch fails (e.g. CORS issues).
+ *
+ * Why publicUrl() is necessary:
+ *   Workers write result URLs using the Docker service name "api" (e.g.
+ *   "http://api:8080/images/foo.jpg"). This URL is only resolvable inside the Docker
+ *   network, not in the user's browser. publicUrl() rewrites the hostname to localhost
+ *   so the browser's fetch/img src succeeds during local development.
+ *   In production behind nginx, the image URL would already use the public domain.
+ *
+ * Props:
+ *   tasks     — array of task objects from GET /api/v1/tasks.
+ *   onRefresh — called when the user clicks the Refresh button.
+ */
 
 import React, { useState } from 'react'
 
+/**
+ * STATUS_STYLES — Tailwind class strings per task status.
+ * Using a lookup map instead of conditional className logic keeps the JSX clean
+ * and makes it easy to add a new status (e.g. "paused") without touching the JSX.
+ */
 const STATUS_STYLES = {
-  completed: 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30',
-  failed:    'bg-red-500/15 text-red-400 ring-1 ring-red-500/30',
-  processing:'bg-blue-500/15 text-blue-400 ring-1 ring-blue-500/30',
-  queued:    'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30',
-  retrying:  'bg-purple-500/15 text-purple-400 ring-1 ring-purple-500/30',
-  cancelled: 'bg-slate-500/15 text-slate-400 ring-1 ring-slate-500/30',
+  completed: 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30', // task finished successfully
+  failed:    'bg-red-500/15 text-red-400 ring-1 ring-red-500/30',             // all retries exhausted
+  processing:'bg-blue-500/15 text-blue-400 ring-1 ring-blue-500/30',          // worker is running it right now
+  queued:    'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30',        // waiting in the Redis Stream
+  retrying:  'bg-purple-500/15 text-purple-400 ring-1 ring-purple-500/30',    // in exponential-backoff sleep
+  cancelled: 'bg-slate-500/15 text-slate-400 ring-1 ring-slate-500/30',       // cancelled by user or admin
 }
 
-// Convert Docker-internal URLs to localhost so the browser can reach them.
+/**
+ * publicUrl — converts a Docker-internal URL to one the browser can reach.
+ *
+ * Workers store output URLs using the Docker Compose service name ("api") as the
+ * host. This is unreachable outside the Docker network. During local dev the
+ * browser must use "localhost:8080" instead.
+ *
+ * The second transform handles a path pattern where the URL contains the image
+ * filename directly under the API root (e.g. "localhost:8080/foo.jpg") and
+ * normalises it to the "/images/" static route.
+ *
+ * @param {string|null} url
+ * @returns {string|null}
+ */
 function publicUrl(url) {
   if (!url) return url
-  let u = url.replace('http://api:8080', 'http://localhost:8080')
+  let u = url.replace('http://api:8080', 'http://localhost:8080') // rewrite Docker internal host
+  // If the URL points directly to a bare image filename (not under /images/), add the prefix.
   if (u.match(/^http:\/\/localhost:8080\/[^/]+\.(jpg|jpeg|png|gif|webp)$/i)) {
     u = `http://localhost:8080/images/${u.split('/').pop()}`
   }
   return u
 }
 
-// Extract output URL from a task result (handles string or object).
+/**
+ * getOutputUrl — extracts the processed image URL from a task's result field.
+ *
+ * The `result` field can be:
+ *   - null / undefined — task hasn't finished yet.
+ *   - a JSON string    — stored as TEXT in PostgreSQL; needs JSON.parse.
+ *   - a JS object      — already parsed by axios/JSON.parse.
+ * Both snake_case (output_url) and camelCase (outputUrl) field names are handled
+ * because the Go API serialises with json:"output_url" tags but some older responses
+ * may use camelCase.
+ *
+ * @param {object} task
+ * @returns {string|null}
+ */
 function getOutputUrl(task) {
-  if (task.status !== 'completed') return null
+  if (task.status !== 'completed') return null // only completed tasks have output URLs
   let result = task.result
   if (typeof result === 'string') {
-    try { result = JSON.parse(result) } catch (_) { return null }
+    try { result = JSON.parse(result) } catch (_) { return null } // silently skip malformed JSON
   }
   return result?.output_url || result?.outputUrl || null
 }
 
+/**
+ * downloadImage — fetches the processed image as a Blob and triggers a browser download.
+ *
+ * Why Blob + createObjectURL instead of window.open(url)?
+ *   window.open opens the image in a new tab instead of downloading it. Programmatic
+ *   download requires creating a temporary <a> element with the `download` attribute
+ *   set to the desired filename. Attaching it to document.body ensures click() works
+ *   in all browsers. revokeObjectURL frees the Blob URL after download.
+ *
+ *   Falls back to window.open if the fetch fails (e.g. the image has already been
+ *   cleaned up from disk or the URL is not reachable from the browser).
+ *
+ * @param {object} task
+ */
 async function downloadImage(task) {
   const raw = getOutputUrl(task)
   if (!raw) return
-  const url = publicUrl(raw)
+  const url = publicUrl(raw) // translate Docker-internal URL to browser-reachable URL
   try {
     const res = await fetch(url)
-    if (!res.ok) throw new Error(`${res.status}`)
+    if (!res.ok) throw new Error(`${res.status}`) // non-2xx → trigger fallback
     const blob = await res.blob()
+    // Derive file extension from MIME type (e.g. "image/webp" → "webp").
+    // Falls back to the URL extension, then "jpg" if neither is available.
     const ext = blob.type.split('/')[1] || url.split('.').pop()?.split('?')[0] || 'jpg'
     const a = document.createElement('a')
-    a.href = window.URL.createObjectURL(blob)
-    a.download = `task-${task.id.substring(0, 8)}.${ext}`
-    document.body.appendChild(a)
+    a.href = window.URL.createObjectURL(blob) // create a temporary in-memory URL for the blob
+    a.download = `task-${task.id.substring(0, 8)}.${ext}` // suggested filename for the browser's save dialog
+    document.body.appendChild(a) // must be in DOM for Firefox to trigger the download
     a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(a.href)
+    document.body.removeChild(a) // clean up the temporary element
+    window.URL.revokeObjectURL(a.href) // free the memory used by the blob URL
   } catch (_) {
-    window.open(url, '_blank')
+    window.open(url, '_blank') // fallback: open in new tab so user can save manually
   }
 }
 
+/**
+ * fmtDate — formats an ISO timestamp into a short localised date+time string.
+ * Returns '—' for null/undefined values (e.g. completed_at before a task finishes).
+ *
+ * @param {string|null} v - ISO 8601 timestamp string
+ * @returns {string}
+ */
 function fmtDate(v) {
   if (!v) return '—'
   return new Date(v).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })

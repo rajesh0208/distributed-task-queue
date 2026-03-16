@@ -1,3 +1,42 @@
+// Package integration contains end-to-end tests that exercise the HTTP API
+// against real infrastructure (PostgreSQL + Redis).
+//
+// # Why most tests are skipped
+//
+// Integration tests require a running database and cache, which aren't
+// available in a plain `go test ./...` run (e.g. in CI without Docker).
+// Tests that need real infrastructure call t.Skip("Requires test database setup")
+// so the suite still compiles and lists the test names without failing.
+//
+// # How to un-skip
+//
+// To run the full suite:
+//  1. Start the stack:   docker compose up -d postgres redis
+//  2. Export env vars:   source .env
+//  3. Run:               go test -v ./tests/integration/...
+//
+// # Test structure
+//
+//   TestAuthenticationFlow   — happy-path register → login → token validation
+//                              (skipped; needs real server + DB)
+//   TestRegistrationValidation — table-driven validation of bad registration
+//                                inputs; currently validates test data shape
+//                                (test cases are well-formed) rather than
+//                                making HTTP calls.
+//   TestLoginValidation       — table-driven validation of bad login inputs;
+//                               same stub pattern as above.
+//
+// # Table-driven tests
+//
+// Both validation test functions use Go's table-driven test pattern:
+// a slice of anonymous structs, one entry per scenario, iterated with
+// t.Run(tc.name, ...). This keeps all related cases in one place and
+// makes it easy to add new scenarios without duplicating boilerplate.
+//
+// Currently each t.Run body only validates that the test case struct is
+// well-formed (name non-empty, body non-nil). The real assertions
+// (HTTP status code, error message body) are left as TODOs for when the
+// test server setup is wired up.
 package integration
 
 import (

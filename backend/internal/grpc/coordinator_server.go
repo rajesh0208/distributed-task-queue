@@ -1,6 +1,44 @@
 // File: internal/grpc/coordinator_server.go
+//
+// gRPC CoordinatorService server — excluded from all builds until proto files
+// are generated (see client.go for the full explanation of `// +build ignore`).
+//
+// # Role of the Coordinator
+//
+// The coordinator is the control-plane counterpart to the worker's data-plane:
+//
+//   Workers (WorkerServer)   — task lifecycle: pick up, heartbeat, complete
+//   Coordinator (this file)  — observability: metrics aggregation, health
+//
+// In a multi-region deployment you might have multiple coordinator replicas;
+// each reads from the shared PostgreSQL storage so their views are consistent.
+//
+// # GetMetrics
+//
+// Returns aggregate system metrics (queue depth, worker counts, throughput)
+// pulled from storage.GetMetrics(). Currently returns Unimplemented because
+// the proto response message (pb.MetricsResponse) hasn't been generated yet.
+// When the proto is ready, replace the body with:
+//
+//   m, err := s.storage.GetMetrics(ctx)
+//   // map m to pb.MetricsResponse and return
+//
+// # HealthCheck
+//
+// Unlike GetMetrics, HealthCheck has a real implementation: it pings the
+// PostgreSQL connection via storage.GetDB().PingContext(ctx) and returns a
+// map of component → "healthy"/"unhealthy". This works without a proto because
+// the response is a plain map[string]interface{} (not a proto message).
+//
+// The overall status is "unhealthy" if ANY individual check fails, so callers
+// (load balancers, k8s liveness probes) don't need to inspect the `checks` map.
+//
+// # TODO: add Redis health check
+//
+// The checks map currently only includes "database". A Redis ping should be
+// added once the coordinator has access to the cache layer.
+//
 // +build ignore
-// Note: This file requires proto files to be generated first
 
 package grpc
 

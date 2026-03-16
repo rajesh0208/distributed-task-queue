@@ -1,27 +1,59 @@
-// src/components/SubmitCard.jsx
-// Task submission card with two modes:
-//   • Single — drag-and-drop one image, edit JSON payload, submit.
-//   • Batch  — drop up to BATCH_LIMIT images, upload all, submit as one batch.
+/**
+ * src/components/SubmitCard.jsx
+ *
+ * Task submission card with two modes:
+ *   • Single — drag-and-drop one image, edit JSON payload, submit one task.
+ *   • Batch  — drop up to BATCH_LIMIT images, upload all, submit as one batch request.
+ *
+ * Two-step upload flow (why upload before submit?):
+ *   1. Upload: POST /api/v1/upload with the image file → server returns a URL.
+ *   2. Submit: POST /api/v1/tasks with the payload containing that URL.
+ *   Separating these steps allows the API server to validate file size and type before
+ *   the task is queued. Workers only receive the URL and fetch it when they process the
+ *   task, so they're not blocked waiting for multipart uploads.
+ *
+ * Component tree:
+ *   SubmitCard (wrapper, owns type + batchMode state)
+ *   ├── SingleSubmit (single image drop zone, payload editor, upload + submit)
+ *   └── BatchSubmit  (multi-image drop zone, per-image upload, batch submit)
+ *
+ * Why key={`batch-${type}`} and key={`single-${type}`} on child components?
+ *   React uses the key prop to decide whether to reuse or recreate a component.
+ *   Changing the task type should reset all form state (uploaded URL, payload text, etc.)
+ *   in the child component. By including `type` in the key, React unmounts and remounts
+ *   the child whenever `type` changes, ensuring a clean state without manual resets.
+ *
+ * useDropzone (react-dropzone):
+ *   getRootProps/getInputProps wire up the drag events and file dialog to the drop zone
+ *   div. The `accept` option restricts to MIME types matching "image/*" so non-image
+ *   files are rejected before they reach the server.
+ */
 
 import React, { useState, useCallback, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
 import clsx from 'clsx'
 import { uploadFile, createTask, createBatch } from '../api/api'
 
-// Maximum images allowed per batch submission.
+/** Maximum images allowed per batch submission (server-side limit is 500; UI limits to 5 for UX). */
 const BATCH_LIMIT = 5
 
+/** All supported task types shown as pill buttons in the card header. */
 const TASK_TYPES = [
-  { value: 'image_resize',         label: 'Resize' },
-  { value: 'image_compress',       label: 'Compress' },
-  { value: 'image_filter',         label: 'Filter' },
-  { value: 'image_watermark',      label: 'Watermark' },
-  { value: 'image_thumbnail',      label: 'Thumbnail' },
-  { value: 'image_format_convert', label: 'Format Convert' },
-  { value: 'image_crop',           label: 'Crop' },
-  { value: 'image_responsive',     label: 'Responsive' },
+  { value: 'image_resize',         label: 'Resize' },         // width × height with optional aspect-ratio lock
+  { value: 'image_compress',       label: 'Compress' },       // reduce file size while preserving quality
+  { value: 'image_filter',         label: 'Filter' },         // apply visual effects (grayscale, sepia, blur, sharpen)
+  { value: 'image_watermark',      label: 'Watermark' },      // overlay a second image with configurable opacity/position
+  { value: 'image_thumbnail',      label: 'Thumbnail' },      // generate a square thumbnail with a fit mode
+  { value: 'image_format_convert', label: 'Format Convert' }, // transcode between jpg/png/webp
+  { value: 'image_crop',           label: 'Crop' },           // extract a rectangular region
+  { value: 'image_responsive',     label: 'Responsive' },     // generate multiple resized variants for srcset
 ]
 
+/**
+ * DEFAULT_PAYLOADS — sensible starter payloads shown in the JSON editor when a type is selected.
+ * source_url is empty — the upload step fills it in before the user submits.
+ * These default values must match the field names expected by the Go processor.
+ */
 const DEFAULT_PAYLOADS = {
   image_resize:         { source_url: '', width: 800, height: 600, maintain_aspect: true },
   image_compress:       { source_url: '', quality: 80, format: 'jpeg' },
@@ -30,7 +62,7 @@ const DEFAULT_PAYLOADS = {
   image_thumbnail:      { source_url: '', size: 200 },
   image_format_convert: { source_url: '', output_format: 'webp' },
   image_crop:           { source_url: '', x: 0, y: 0, width: 400, height: 300 },
-  image_responsive:     { source_url: '', widths: [320, 640, 1280] },
+  image_responsive:     { source_url: '', widths: [320, 640, 1280] }, // generates 3 output files
 }
 
 // ─── Single image mode ────────────────────────────────────────────────────────

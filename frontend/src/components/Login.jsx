@@ -1,43 +1,74 @@
-// src/components/Login.jsx
-// Login / register page with email+password and Google/GitHub OAuth buttons.
+/**
+ * src/components/Login.jsx
+ *
+ * Login / register page with email+password and Google/GitHub OAuth buttons.
+ *
+ * Component responsibilities:
+ *   - Renders a single card that switches between "Sign in" and "Sign up" modes
+ *     via the isLogin flag.
+ *   - Calls api.login or api.register on form submit, then stores the returned JWT
+ *     in localStorage and calls onLogin(token) to notify the parent (App.jsx) that
+ *     authentication succeeded.
+ *   - OAuth buttons redirect the browser to the backend OAuth initiation endpoint
+ *     (/api/v1/auth/oauth/:provider). The backend handles the PKCE/state flow and
+ *     redirects back with a JWT token.
+ *
+ * State:
+ *   isLogin   — true = "Sign in" form, false = "Sign up" form.
+ *   formData  — controlled inputs: username, email (register only), password.
+ *   error     — non-null string displayed in a red alert banner.
+ *   loading   — disables the submit button while the API call is in flight.
+ *
+ * Props:
+ *   onLogin(token) — called by the parent to transition to the authenticated view.
+ */
 
 import React, { useState } from 'react'
 import { login as apiLogin, register as apiRegister } from '../api/api'
 
+// API_BASE is needed for the OAuth redirect URL which goes directly to the browser
+// (not through axios), so we can't use the api.js module for that path.
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
 export default function Login({ onLogin }) {
-  const [isLogin, setIsLogin] = useState(true)
-  const [formData, setFormData] = useState({ username: '', email: '', password: '' })
-  const [error, setError] = useState(null)
-  const [loading, setLoading] = useState(false)
+  const [isLogin, setIsLogin] = useState(true)                                   // toggles between login and register UI
+  const [formData, setFormData] = useState({ username: '', email: '', password: '' }) // controlled form fields
+  const [error, setError] = useState(null)                                        // error message to display in the banner
+  const [loading, setLoading] = useState(false)                                   // true while waiting for the API response
 
   const handleSubmit = async (e) => {
-    e.preventDefault()
-    setError(null)
+    e.preventDefault()  // prevent the browser's default form submission (which would reload the page)
+    setError(null)      // clear any previous error before retrying
     setLoading(true)
     try {
       const response = isLogin
         ? await apiLogin(formData.username, formData.password)
         : await apiRegister(
             formData.username,
+            // Email is optional on the register form; fall back to a placeholder so the
+            // server's "email is required" validation doesn't fire while the field is empty.
             formData.email || `${formData.username}@example.com`,
             formData.password
           )
       if (response.data.token) {
-        localStorage.setItem('token', response.data.token)
-        onLogin(response.data.token)
+        localStorage.setItem('token', response.data.token) // persist JWT across page reloads
+        onLogin(response.data.token)                        // notify parent to switch to the authenticated view
       } else {
-        setError('No token received')
+        setError('No token received') // shouldn't happen with a healthy API but guard anyway
       }
     } catch (err) {
+      // err.response?.data?.error is the JSON error message from the Go API handler.
+      // Falling back to err.message covers network errors (e.g. API is down).
       setError(err.response?.data?.error || err.message || 'Authentication failed')
     } finally {
-      setLoading(false)
+      setLoading(false) // re-enable the submit button regardless of success or failure
     }
   }
 
-  // Redirect to backend OAuth initiation — backend redirects back with ?token=
+  // OAuth flow: redirect the browser to the backend's OAuth initiation endpoint.
+  // The backend generates a CSRF state, saves it, and redirects to Google/GitHub.
+  // On return, the backend's /callback handler exchanges the code for a JWT and
+  // returns it to the frontend (currently via JSON — future: URL query param redirect).
   const handleOAuth = (provider) => {
     window.location.href = `${API_BASE}/auth/oauth/${provider}`
   }

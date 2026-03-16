@@ -1,8 +1,41 @@
-// File: internal/graphql/server.go
+// File: internal/graphql/server.go  (full implementation — compiled only with -tags graphql)
+//
+// This file provides the real GraphQL HTTP handler using the graphql-go library.
+// It is the counterpart to graphql.go (the stub). Exactly one of the two files
+// is compiled into any given binary; the linker selects based on the build tag.
+//
+// # Architecture
+//
+// NewServer wires up the dependency graph:
+//
+//   broker.Broker  ─┐
+//                   ├─► NewRootResolver ─► GetSchema ─► handler.New
+//   storage.Storage ─┘
+//
+// The root resolver (resolver.go) holds references to the broker and storage
+// so GraphQL resolvers can publish tasks and query the database without global
+// state.
+//
+// # GraphiQL vs GraphQL Playground
+//
+// handler.New is configured with GraphiQL: false. GraphiQL is the older
+// in-handler IDE that ships with graphql-go; it is disabled in favour of
+// the richer GraphQL Playground served at /playground by PlaygroundHandler.
+// Playground is loaded from CDN (jsdelivr) via an inline HTML string to avoid
+// vendoring additional static assets.
+//
+// # Pretty-printing
+//
+// Pretty: true formats JSON responses with indentation for human readability.
+// In production you may want to set this to false to save bandwidth.
+//
+// # Enabling this build variant
+//
+//   go build -tags graphql ./...
+//   go test  -tags graphql ./...
+//
 //go:build graphql
 // +build graphql
-
-// Full GraphQL implementation (requires dependencies)
 
 package graphql
 

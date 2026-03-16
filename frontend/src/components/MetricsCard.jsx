@@ -1,14 +1,30 @@
-// src/components/MetricsCard.jsx
-// Three stat cards showing live queue and worker metrics.
+/**
+ * src/components/MetricsCard.jsx
+ *
+ * Three stat tiles showing live queue depth, active worker count, and average
+ * processing latency. Data comes from GET /api/v1/metrics/system polled every 5 s
+ * by Dashboard.jsx.
+ *
+ * Why dual field-name access (snake_case || camelCase)?
+ *   The Go API serialises with json:"queued_tasks" (snake_case), but if a future
+ *   API version or a different serialisation library switches to camelCase
+ *   (queuedTasks), the component would silently show zeros. Reading both field
+ *   names and defaulting to 0 is defensive against API schema drift.
+ *
+ * Props:
+ *   metrics — { queued_tasks, active_workers, avg_processing_time } (or null).
+ *             Returns null early if not yet loaded so no empty tiles flash on mount.
+ */
 
 import React from 'react'
 
 export default function MetricsCard({ metrics }) {
-  if (!metrics) return null
+  if (!metrics) return null // not yet loaded — render nothing (Dashboard shows the spinner)
 
-  const queued = metrics.queued_tasks ?? metrics.queuedTasks ?? 0
-  const workers = metrics.active_workers ?? metrics.activeWorkers ?? 0
-  const avgMs = metrics.avg_processing_time ?? metrics.avgProcessingTime ?? 0
+  // Support both snake_case (API default) and camelCase (future-proofing), defaulting to 0.
+  const queued  = metrics.queued_tasks       ?? metrics.queuedTasks       ?? 0
+  const workers = metrics.active_workers     ?? metrics.activeWorkers     ?? 0
+  const avgMs   = metrics.avg_processing_time ?? metrics.avgProcessingTime ?? 0
 
   const stats = [
     {
