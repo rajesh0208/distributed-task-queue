@@ -1337,14 +1337,14 @@ func (s *APIServer) oauthCallback(c *fiber.Ctx) error {
 		slog.String("user_id", user.ID),
 	)
 
-	return c.JSON(fiber.Map{
-		"token": jwtToken,
-		"user": fiber.Map{
-			"id":       user.ID,
-			"username": user.Username,
-			"email":    user.Email,
-		},
-	})
+	// Redirect the browser back to the frontend with the JWT as a query param.
+	// The frontend's App.jsx reads ?token=, stores it in localStorage, then
+	// strips it from the URL bar via window.history.replaceState.
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost"
+	}
+	return c.Redirect(frontendURL+"/?token="+jwtToken, fiber.StatusTemporaryRedirect)
 }
 
 // deriveUsername turns a provider display name (e.g. "John Doe") into a

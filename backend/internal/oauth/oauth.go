@@ -132,6 +132,9 @@ func fetchGoogleUserInfo(client *http.Client) (*UserInfo, error) {
 		return nil, fmt.Errorf("google userinfo request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("google userinfo returned status %d", resp.StatusCode)
+	}
 
 	var info struct {
 		Sub   string `json:"sub"`
@@ -140,6 +143,9 @@ func fetchGoogleUserInfo(client *http.Client) (*UserInfo, error) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return nil, fmt.Errorf("failed to decode google userinfo: %w", err)
+	}
+	if info.Sub == "" {
+		return nil, fmt.Errorf("google userinfo returned empty user ID")
 	}
 	return &UserInfo{ID: info.Sub, Email: info.Email, Name: info.Name, Provider: ProviderGoogle}, nil
 }
@@ -153,6 +159,9 @@ func fetchGitHubUserInfo(client *http.Client) (*UserInfo, error) {
 		return nil, fmt.Errorf("github user request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github user endpoint returned status %d", resp.StatusCode)
+	}
 
 	var info struct {
 		ID    int64  `json:"id"`
@@ -160,15 +169,25 @@ func fetchGitHubUserInfo(client *http.Client) (*UserInfo, error) {
 		Name  string `json:"name"`
 		Email string `json:"email"`
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read github user response: %w", err)
+	}
 	if err := json.Unmarshal(body, &info); err != nil {
 		return nil, fmt.Errorf("failed to decode github user: %w", err)
+	}
+	if info.ID == 0 {
+		return nil, fmt.Errorf("github user returned empty user ID")
 	}
 
 	email := info.Email
 	if email == "" {
 		// GitHub may hide the primary email; fetch it from the emails endpoint.
-		email, _ = fetchGitHubPrimaryEmail(client)
+		var emailErr error
+		email, emailErr = fetchGitHubPrimaryEmail(client)
+		if emailErr != nil {
+			return nil, fmt.Errorf("failed to fetch github primary email: %w", emailErr)
+		}
 	}
 
 	name := info.Name
@@ -192,6 +211,9 @@ func fetchGitHubPrimaryEmail(client *http.Client) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github emails endpoint returned status %d", resp.StatusCode)
+	}
 
 	var emails []struct {
 		Email   string `json:"email"`
@@ -238,8 +260,27 @@ type memEntry struct {
 }
 
 // NewMemoryStateStore returns an empty MemoryStateStore ready for use.
+// It starts a background goroutine that purges expired entries every minute.
 func NewMemoryStateStore() *MemoryStateStore {
-	return &MemoryStateStore{entries: make(map[string]memEntry)}
+	s := &MemoryStateStore{entries: make(map[string]memEntry)}
+	go s.cleanupLoop()
+	return s
+}
+
+// cleanupLoop periodically removes expired entries to prevent unbounded memory growth.
+func (m *MemoryStateStore) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		m.mu.Lock()
+		for k, e := range m.entries {
+			if now.After(e.expiresAt) {
+				delete(m.entries, k)
+			}
+		}
+		m.mu.Unlock()
+	}
 }
 
 // Save stores a (state → provider) mapping that expires after ttl.
