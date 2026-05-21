@@ -171,6 +171,7 @@ const (
 	BatchStatusCompleted  BatchStatus = "completed"  // every task finished successfully
 	BatchStatusPartial    BatchStatus = "partial"    // done but some tasks failed
 	BatchStatusFailed     BatchStatus = "failed"     // every task failed
+	BatchStatusCancelled  BatchStatus = "cancelled"  // every task was cancelled
 )
 
 // Batch groups multiple tasks submitted together so the caller can track overall

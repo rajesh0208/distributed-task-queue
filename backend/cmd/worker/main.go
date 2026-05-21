@@ -330,7 +330,9 @@ func (w *Worker) handleTask(ctx context.Context, task *models.Task) error {
 		log.Info("task cancelled before processing — skipping")
 		if latestTask.Status != models.StatusCancelled {
 			latestTask.Status = models.StatusCancelled
-			_ = w.storage.UpdateTask(ctx, latestTask)
+			if err := w.storage.UpdateTask(ctx, latestTask); err != nil {
+				log.Error("failed to persist cancelled status", slog.String("task_id", latestTask.ID), slog.String("error", err.Error()))
+			}
 		}
 		return nil
 	}

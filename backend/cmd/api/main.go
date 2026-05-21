@@ -380,6 +380,10 @@ func (s *APIServer) submitTask(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid task type") // reject unknown task types early before hitting storage
 	}
 
+	if req.Priority != 0 && (req.Priority < 1 || req.Priority > 10) {
+		return fiber.NewError(fiber.StatusBadRequest, "priority must be between 1 and 10")
+	}
+
 	var payload map[string]any
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid payload") // payload must be valid JSON; reject binary or malformed input
