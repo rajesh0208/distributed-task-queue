@@ -883,9 +883,15 @@ func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User) err
 		oauthProvider = user.OAuthProvider
 		oauthID = user.OAuthID
 	}
+	// Insert api_key as NULL when empty so the UNIQUE constraint doesn't
+	// treat multiple empty strings as duplicates.
+	var apiKey interface{}
+	if user.APIKey != "" {
+		apiKey = user.APIKey
+	}
 	_, err := s.db.ExecContext(ctx, query,
 		user.ID, user.Username, user.Email, passwordHash,
-		user.APIKey, pq.Array(user.Roles), oauthProvider, oauthID, user.CreatedAt,
+		apiKey, pq.Array(user.Roles), oauthProvider, oauthID, user.CreatedAt,
 	)
 	if err != nil {
 		log.Printf("CreateUser error: %v, username: %s, email: %s", err, user.Username, user.Email)
@@ -1102,6 +1108,7 @@ func (s *PostgresStorage) GetBatch(ctx context.Context, batchID string) (*models
 		Processing  int            `db:"processing"`
 		Completed   int            `db:"completed"`
 		Failed      int            `db:"failed"`
+		Cancelled   int            `db:"cancelled"`
 	}
 	query := `
 		SELECT
@@ -1109,7 +1116,8 @@ func (s *PostgresStorage) GetBatch(ctx context.Context, batchID string) (*models
 			COUNT(*) FILTER (WHERE t.status = 'queued')     AS queued,
 			COUNT(*) FILTER (WHERE t.status = 'processing') AS processing,
 			COUNT(*) FILTER (WHERE t.status = 'completed')  AS completed,
-			COUNT(*) FILTER (WHERE t.status IN ('failed','cancelled')) AS failed
+			COUNT(*) FILTER (WHERE t.status = 'failed')     AS failed,
+			COUNT(*) FILTER (WHERE t.status = 'cancelled')  AS cancelled
 		FROM batches b
 		LEFT JOIN tasks t ON t.batch_id = b.id
 		WHERE b.id = $1
@@ -1123,17 +1131,19 @@ func (s *PostgresStorage) GetBatch(ctx context.Context, batchID string) (*models
 		return nil, fmt.Errorf("failed to get batch: %w", err)
 	}
 
-	done := row.Completed + row.Failed
+	done := row.Completed + row.Failed + row.Cancelled
 	status := models.BatchStatusQueued
 	switch {
 	case row.Processing > 0 || (done > 0 && done < row.Total):
 		status = models.BatchStatusProcessing
-	case done == row.Total && row.Failed == 0:
+	case done == row.Total && row.Failed == 0 && row.Cancelled == 0:
 		status = models.BatchStatusCompleted
-	case done == row.Total && row.Completed > 0:
-		status = models.BatchStatusPartial
+	case done == row.Total && row.Completed == 0 && row.Failed == 0:
+		status = models.BatchStatusCancelled
 	case done == row.Total && row.Completed == 0:
 		status = models.BatchStatusFailed
+	case done == row.Total && row.Completed > 0:
+		status = models.BatchStatusPartial
 	}
 
 	return &models.Batch{
