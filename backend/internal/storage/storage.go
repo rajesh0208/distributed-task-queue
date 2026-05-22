@@ -925,10 +925,24 @@ func (s *PostgresStorage) getUser(ctx context.Context, field, value string) (*mo
 		OAuthID       sql.NullString `db:"oauth_id"`
 		CreatedAt     time.Time      `db:"created_at"`
 	}
+	// Whitelist allowed column names to prevent SQL injection via the field parameter.
+	var col string
+	switch field {
+	case "id":
+		col = "id"
+	case "username":
+		col = "username"
+	case "email":
+		col = "email"
+	case "api_key":
+		col = "api_key"
+	default:
+		return nil, fmt.Errorf("invalid user lookup field: %s", field)
+	}
 	var row userRow
 	query := fmt.Sprintf(
 		"SELECT id, username, email, password_hash, api_key, roles, oauth_provider, oauth_id, created_at FROM users WHERE %s = $1",
-		field,
+		col,
 	)
 	if err := s.db.GetContext(ctx, &row, query, value); err != nil {
 		if err == sql.ErrNoRows {

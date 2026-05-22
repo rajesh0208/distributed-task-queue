@@ -260,7 +260,7 @@ func NewAPIServer() (*APIServer, error) {
 	app.Use(tracingMiddleware())  // creates an OTel server span per request; stores enriched context in c.UserContext()
 	app.Use(logger.New())         // logs every request: method, path, status code, and response time
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: getEnv("CORS_ORIGINS", "*"),                         // which frontend origins can call this API
+		AllowOrigins: getEnv("CORS_ORIGINS", "http://localhost,http://localhost:80,http://localhost:3000"), // which frontend origins can call this API
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization, X-API-Key", // allowed request headers (X-API-Key for API key auth)
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",                        // allowed HTTP methods (OPTIONS required for preflight)
 	}))
@@ -662,12 +662,17 @@ func (s *APIServer) login(c *fiber.Ctx) error {
 // Adds the current JWT to a Redis blacklist so it cannot be used again before it expires.
 // Without this, JWTs would remain valid until their natural expiry even after logout.
 func (s *APIServer) logout(c *fiber.Ctx) error {
-	authHeader := c.Get("Authorization")           // read the "Authorization: Bearer <token>" header
-	parts := strings.Split(authHeader, " ")        // split into ["Bearer", "<token>"]
+	authHeader := c.Get("Authorization")    // read the "Authorization: Bearer <token>" header
+	parts := strings.Split(authHeader, " ") // split into ["Bearer", "<token>"]
 	if len(parts) != 2 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid authorization header") // header missing or malformed
 	}
-	if err := s.authService.BlacklistToken(parts[1]); err != nil { // store token in Redis with TTL equal to its remaining validity
+	token := parts[1]
+	// Validate the token before blacklisting to prevent arbitrary strings filling Redis.
+	if _, err := s.authService.ValidateToken(token); err != nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
+	}
+	if err := s.authService.BlacklistToken(token); err != nil { // store token in Redis with TTL equal to its remaining validity
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to logout")
 	}
 	return c.JSON(fiber.Map{"message": "logged out successfully"})
@@ -1225,7 +1230,8 @@ func (s *APIServer) getBatch(c *fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusNotFound, "batch not found")
 	}
-	if batch.UserID != userID && !hasRole(c.Locals("roles").([]string), "admin") {
+	roles, _ := c.Locals("roles").([]string)
+	if batch.UserID != userID && !hasRole(roles, "admin") {
 		return fiber.NewError(fiber.StatusForbidden, "access denied")
 	}
 	return c.JSON(batch)
